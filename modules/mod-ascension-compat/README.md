@@ -27,6 +27,22 @@ Import the [world database package](../../apps/coa-world/README.md) into an empt
 world schema before the first worldserver startup. The same guide covers auditing
 an existing database and updating the package.
 
+## Automatic specialization talents
+
+Automatic spec progression requires its level and spec-tree prerequisites, but
+does not require purchasing a talent in the shared class tree. The workspace
+`tools/Generate-LocalCoATalentData.ps1` removes those paid cross-tree requirements
+before generating both `AscensionCoATalentData.h` and the canonical client's
+`CoATalentNodeData.lua`. Paid talents and selectable free choices remain explicit.
+Regenerate both outputs together; the matching client source must be packaged
+when deploying the server change.
+
+Run `python -B modules/mod-ascension-compat/tests/test_automatic_talent_dependencies.py`
+for the server data regressions. Add `--client-addon-dir <Ascension_Collections>`
+with `lupa` installed to also exercise the client Lua 5.1 rank calculation and
+check that its dependencies match the server. These checks do not build or launch
+the server or game client.
+
 ## Login and natural regeneration
 
 The copied client's `Extensions.dll` patches the ping timer at executable address
@@ -37,6 +53,14 @@ accounts are disconnected after exceeding `MaxOverspeedPings`, while GM permissi
 23 bypasses that check. Local connections with `AscensionCompat.Enable = 1` accept
 the five-second cadence with a one-second jitter margin. Faster sustained flooding
 still reaches the strike limit. Other connections retain the stock limit.
+
+For a realm dedicated to this client, set `AscensionCompat.AllowRemoteClients = 1`
+and restart worldserver. This also applies the configured plaintext world headers,
+extension opcode range and ping interval to remote connections. The default is `0`;
+password proofs, IP bans and packet size validation remain required.
+The native v4 client also needs the [world-address fix](../../apps/client-compat/README.md)
+to enter remote worlds without its DLL corrupting an active client hook. That fix uses
+the authserver's realm address without a per-IP allowlist.
 
 The `gtOCTRegenHP`, `gtRegenHPPerSpt` and `gtRegenMPPerSpt` client files each contain
 3,200 single-float rows indexed by class and level. Their SQL tables contain explicit

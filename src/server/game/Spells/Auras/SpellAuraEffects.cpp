@@ -771,6 +771,17 @@ void AuraEffect::CalculateSpellMod()
     {
         case SPELL_AURA_ADD_FLAT_MODIFIER:
         case SPELL_AURA_ADD_PCT_MODIFIER:
+            // Ascension spells carry MiscValues outside the 3.3.5a SpellModOp
+            // range. Player::AddSpellMod indexes m_spellMods[op] directly, so an
+            // out-of-range op corrupts memory instead of failing visibly.
+            if (GetMiscValue() < 0 || GetMiscValue() >= MAX_SPELLMOD)
+            {
+                LOG_DEBUG("spells.aura",
+                    "AuraEffect::CalculateSpellMod: spell {} effect {} has out-of-range SpellModOp {}, ignored",
+                    GetId(), uint32(GetEffIndex()), GetMiscValue());
+                break;
+            }
+
             if (!m_spellmod)
             {
                 m_spellmod = new SpellModifier(GetBase());

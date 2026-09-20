@@ -51,9 +51,6 @@ void ApplyContracts(SpellInfo* info)
         }
     if (Named(info, 520590))
     {
-        info->MaxCharges = 2;
-        info->ChargeRecoveryTime = 18000;
-        info->ChargeRecoveryKey = 520590;
         info->RecoveryTime = 0;
         info->CategoryRecoveryTime = 0;
     }
@@ -227,7 +224,10 @@ void ApplyContracts(SpellInfo* info)
     if (id == 707751 || id == 561062)
         dummy(0), dummy(1); // Burning is evaluated against the actual target, including Trueshot helpers.
     if (id == 801975)
-        dummy(0), dummy(1);
+        // Only the Scattered Stars proc is reimplemented (Huntress Shot and Starcall add their extra
+        // stack in ApplyAbilities). Effect 1 is the native SPELLMOD_RANGE the tooltip promises, so it
+        // has to stay a real modifier or ranged abilities keep their unmodified range.
+        dummy(0);
     if (id == 807195)
         info->AuraInterruptFlags |= AURA_INTERRUPT_FLAG_TAKE_DAMAGE;
     if (id == 570231)
@@ -277,6 +277,12 @@ void ApplyContracts(SpellInfo* info)
 namespace
 {
 using namespace AscensionStarcaller;
+enum StarfireSpells : uint32
+{
+    SPELL_STARFIRE_SHOT = 801978,
+    SPELL_STARFIRE_FLAT_DAMAGE = 801977
+};
+
 class starcaller_scaling : public UnitScript
 {
   public:
@@ -292,6 +298,9 @@ class starcaller_scaling : public UnitScript
         Player* player = Owner(caster);
         if (!player || !info)
             return;
+        if (index == EFFECT_0 && Named(info, SPELL_STARFIRE_SHOT))
+            // Every rank's tooltip uses this helper for its flat damage; the weapon and mana terms stay separate.
+            value = float(Amount(SPELL_STARFIRE_FLAT_DAMAGE, EFFECT_0, player));
         for (auto const& row : StarcallerCoefficients)
             if (row.spell == info->Id && row.effect == index)
             {

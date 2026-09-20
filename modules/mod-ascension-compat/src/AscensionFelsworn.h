@@ -12,6 +12,13 @@ class Unit;
 class Spell;
 namespace AscensionFelsworn
 {
+enum FelswornSpells : uint32
+{
+    BurningCommander = 92089,
+    MannorothFelfury = 801043,
+    Unphased = 803645
+};
+
 struct Debt
 {
     uint64 remaining;
@@ -45,6 +52,7 @@ bool Pact(SpellInfo const* info);
 bool Rush(SpellInfo const* info);
 bool Twin(SpellInfo const* info);
 bool Inner(Unit const* player);
+bool Triggered(Spell const* spell);
 int32 Amount(uint32 spell, uint8 effect = 0, Unit* caster = nullptr);
 uint32 Fury(Unit const* player);
 void Gain(Player* player, uint32 amount);
@@ -59,6 +67,7 @@ bool Chance(Player* player, uint32 talent, uint32 cooldown = 0);
 void Reduce(Player* player, uint32 root, int32 milliseconds);
 void Replace(Player* player, uint32 root, uint32 replacement);
 void SpreadCripple(Player* player, Unit* target);
+void RefreshUnphased(Player* player);
 void Summon(Player* player, Position const& position, bool extended);
 void ApplyContracts(SpellInfo* info);
 } // namespace AscensionFelsworn

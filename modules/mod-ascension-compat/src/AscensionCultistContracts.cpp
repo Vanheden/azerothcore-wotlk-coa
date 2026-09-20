@@ -79,15 +79,6 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[0].MiscValue = 250043;
     if (id == 806769)
         info->Effects[2].MiscValue = 250044;
-    if (Any(info, {500720, 804711}))
-    {
-        bool blade = Named(info, 500720);
-        info->MaxCharges = blade ? 3 : 2;
-        info->ChargeRecoveryTime = blade ? 6000 : 60000;
-        info->ChargeRecoveryKey = blade ? 500720 : 804711;
-        if (!info->ChargeCategoryId)
-            info->ChargeCategoryId = blade ? 500720 : 804711;
-    }
     if (Named(info, 804152))
         info->CasterAuraSpell = 680602;
     if (Any(info, {805116, 804152}))
@@ -272,6 +263,13 @@ public:
         Player* player = Owner(caster);
         if (!player || !info || info->SpellFamilyName != 31)
             return;
+        if (info->Id == CthunDamage && index == EFFECT_0 && caster->GetEntry() == CthunTentacle)
+        {
+            // The active summon references SpellDescriptionVariables row 182 for the base damage.
+            double const level = player->GetLevel();
+            value *= float(0.0267291844060354 + 0.0048541098014737 * level +
+                0.0001859597762293 * level * level);
+        }
         for (auto const& row : CultistCoefficients)
             if (row.spell == info->Id && row.effect == index)
             {
@@ -288,7 +286,7 @@ public:
                          healing * std::max(0, player->SpellBaseHealingBonusDone(info->GetSchoolMask())) +
                          row.stamina * player->GetStat(STAT_STAMINA) + row.intellect * player->GetStat(STAT_INTELLECT);
             }
-        bool tentacle = caster->GetEntry() == 50272 || caster->GetEntry() == 501464 || caster->GetEntry() == 500465 ||
+        bool tentacle = caster->GetEntry() == CthunTentacle || caster->GetEntry() == 501464 || caster->GetEntry() == 500465 ||
                         caster->GetEntry() == 50096 || caster->GetEntry() == 500464;
         if (caster != player && tentacle && State(player).summons.count(caster->GetGUID()) && player->HasAura(802048))
             value *= 1 + Amount(802048) / 100.0f;

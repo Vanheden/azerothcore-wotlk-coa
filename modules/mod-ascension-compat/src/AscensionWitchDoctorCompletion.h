@@ -131,6 +131,8 @@ enum DoctorSpells : uint32
     LoaBrew = 801670,
     LoaBlessing = 705848,
     LoaEchoHeal = 899906,
+    JungleSecrets = 707212,
+    JungleSecretsHeal = 712348,
     BlessingOne = 802207,
     BlessingTwo = 802208,
     BlessingThree = 802215,
@@ -224,6 +226,7 @@ enum DoctorSpells : uint32
     SpiritManaTick = 805282,
     SentryWard = 674303,
     CallSseratus = 572899,
+    CallSseratusChannel = 681222,
     ViperTalent = 707329,
     ViperWard = 712373,
     ViperProc = 712374,
@@ -231,6 +234,8 @@ enum DoctorSpells : uint32
     CursedEffigy = 706542,
     CursedField = 506820,
     Mimic = 707162,
+    ChosenOne = 503742,
+    MojoHigh = 706488,
     WarGolem = 800330,
     StasisWard = 801678,
     Stasis = 801677,
@@ -241,6 +246,8 @@ enum DoctorSpells : uint32
     CauldronBuff = 504419,
     MojoCauldron = 807908,
     Mirage = 501136,
+    SenjinSwiftness = 504426,
+    SenjinWisdom = 504774,
     Slither = 500947,
     SlitherAvoid = 806295,
     Shadowstalker = 807040,
@@ -397,6 +404,7 @@ void Mix(Player* player, uint32 mojo);
 uint32 IngredientMask(Player* player);
 void PotionEffects(Player* player, Unit* target, bool splash, uint32 mojo, uint32 ingredients);
 void PruneSummons(Player* player);
+void HealThroughEffigies(Player* player, Unit* primary, uint32 healing);
 void Summon(Player* player, uint32 spell, Unit* target, Position const& position);
 void Mirror(Player* player, Unit* target, uint32 spell);
 bool HasSummon(Player* player, uint32 entry);

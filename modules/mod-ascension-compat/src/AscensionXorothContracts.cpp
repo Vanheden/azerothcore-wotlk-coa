@@ -10,11 +10,30 @@
 #include <algorithm>
 namespace AscensionXoroth
 {
+namespace
+{
+enum FleshHook : uint32
+{
+    SPELL_FLESH_HOOK_PULL = 800605,
+    SPELL_RANGE_THIRTY_YARDS = 4
+};
+}
+
 void ApplyContracts(SpellInfo* info)
 {
     if (!info || info->SpellFamilyName != 23)
         return;
     uint32 id = info->Id;
+    if (id == SPELL_WARPATH_PROTECTION && info->Effects[EFFECT_0].ApplyAuraName == SPELL_AURA_MOD_MINIMUM_SPEED)
+        info->DurationEntry = sSpellDurationStore.LookupEntry(27); // Three seconds after Unleash Pestilence.
+    if (id == SPELL_FLESH_HOOK_PULL)
+    {
+        // The parent has already passed its range and hit checks before scheduling this helper.
+        // Do not roll melee avoidance again or reject an enemy that approaches during the delay.
+        // Native spell/mechanic immunities still apply to this non-damaging pull.
+        info->DmgClass = SPELL_DAMAGE_CLASS_NONE;
+        info->RangeEntry = sSpellRangeStore.LookupEntry(SPELL_RANGE_THIRTY_YARDS);
+    }
     if (id == 520440 || id == 520441)
         for (auto& effect : info->Effects)
             effect.Effect = 0; // Legacy delayed removal must not erase Demonfire generated after reservation.
@@ -107,12 +126,6 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[1].Effect = 0;
     if (id == 805679)
         info->Effects[0].TargetA = SpellImplicitTargetInfo(TARGET_UNIT_CASTER);
-    if (id == 807247)
-    {
-        info->MaxCharges = 2;
-        info->ChargeRecoveryTime = 60000;
-        info->ChargeRecoveryKey = 807247;
-    }
     if (id == 302555)
     {
         info->Effects[0].Effect = SPELL_EFFECT_APPLY_AURA;
@@ -158,6 +171,8 @@ void ApplyContracts(SpellInfo* info)
         dummy(1);
         dummy(2);
     }
+    if (id == 805677)
+        info->CasterAuraSpell = 0; // spell_ascension_xoroth_sacrificial_circle checks the living Hellfire Imps
     if (id == 805965)
     {
         auto& e = info->Effects[0];
@@ -185,6 +200,11 @@ void ApplyContracts(SpellInfo* info)
         e.TriggerSpell = 0;
         e.TargetA = SpellImplicitTargetInfo(TARGET_UNIT_CASTER);
         e.TargetB = SpellImplicitTargetInfo();
+    }
+    if (id == 804786)
+    {
+        // The original enemy area aura was classified before conversion to the self-only driver above.
+        info->AttributesCu &= ~SPELL_ATTR0_CU_NEGATIVE_EFF0;
     }
     if (id == 801055 || id == 560817 || id == 802855 || id == 802856 || id == 802857 || id == 801052)
         for (auto& e : info->Effects)
@@ -277,6 +297,12 @@ class xoroth_scaling : public UnitScript
             player = Owner(caster->GetOwner());
         if (!player || !info)
             return;
+        if (info->Id == 630930 && index == EFFECT_0 && caster->GetEntry() == 510100)
+        {
+            // Burning Slap: copied SpellDescriptionVariables row 182 ($scalingbp), then AP/SP bonuses.
+            double level = caster->GetLevel();
+            value *= float(0.0267291844060354 + 0.0048541098014737 * level + 0.0001859597762293 * level * level);
+        }
         for (auto const& row : XorothCoefficients)
             if (row.spell == info->Id && row.effect == index)
             {

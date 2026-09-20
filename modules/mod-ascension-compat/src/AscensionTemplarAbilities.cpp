@@ -135,6 +135,8 @@ class templar_casts : public AllSpellScript
             if (player->HasAura(passive))
                 Cast(player, player, child);
         };
+        if (Named(info, 805421)) // Sacred Resistance: all Reckoning ranks, once per completed cast.
+            talent(301309, 680870);
         Unit* target = spell->m_targets.GetUnitTarget();
         if (Family(info, 2, 1) || info->Id == 500689)
         {
@@ -337,11 +339,69 @@ class spell_ascension_templar_ability : public SpellScript
         if (player && Named(GetSpellInfo(), 801448) && !player->HasAura(705287))
             PreventHitDefaultEffect(effect);
     }
+    // Profound Enlightenment: each effect reduces the remaining cooldown of the named Testament, every rank.
+    void Enlighten(SpellEffIndex effect)
+    {
+        SpellEffectInfo const& info = GetSpellInfo()->Effects[effect];
+        Player* player = Owner(GetCaster());
+        if (!player || info.Effect != 192)
+            return;
+        PreventHitDefaultEffect(effect);
+        for (auto const& pair : player->GetSpellMap())
+            if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), uint32(info.MiscValue)))
+                if (uint32 remaining = player->GetSpellCooldownDelay(pair.first))
+                    player->ModifySpellCooldown(pair.first, -int32(CalculatePct(remaining, GetEffectValue())));
+    }
+    // Devotion of Khaz'goroth: auto attacks reduce every Libram's cooldown, every rank, by the first effect's value.
+    void Devotion(SpellEffIndex effect)
+    {
+        PreventHitDefaultEffect(effect);
+        if (Player* player = Owner(GetCaster()); player && effect == EFFECT_0)
+            ReduceLibrams(player, std::abs(GetEffectValue()));
+    }
+    // Absolution: the taunt is its own effect, but the movement speed its description promises lives in 520659,
+    // which nothing casts.
+    void Absolve()
+    {
+        if (Player* player = Owner(GetCaster()))
+            Cast(player, player, 520659);
+    }
+    // Transcending Strikes: the helper names one Divine Force rank, so the core's exact-id cooldown effect misses
+    // the rank the Templar owns. Apply it to every owned rank of the named ability instead.
+    void Transcend(SpellEffIndex effect)
+    {
+        SpellEffectInfo const& info = GetSpellInfo()->Effects[effect];
+        Player* player = Owner(GetCaster());
+        SpellInfo const* named = sSpellMgr->GetSpellInfo(uint32(info.MiscValue));
+        if (!player || !named)
+            return;
+        PreventHitDefaultEffect(effect);
+        int32 const delta = GetEffectValue();
+        for (auto const& pair : player->GetSpellMap())
+        {
+            SpellInfo const* owned = player->HasSpell(pair.first) ? sSpellMgr->GetSpellInfo(pair.first) : nullptr;
+            if (!owned || owned->SpellFamilyName != named->SpellFamilyName ||
+                !(owned->SpellFamilyFlags & named->SpellFamilyFlags))
+                continue;
+            if (player->GetSpellCooldownDelay(pair.first))
+                player->ModifySpellCooldown(pair.first, delta);
+        }
+    }
     void Register() override
     {
         if (SpellInfo const* info = sSpellMgr->GetSpellInfo(m_scriptSpellId); Named(info, 801448))
             OnEffectLaunchTarget +=
                 SpellEffectFn(spell_ascension_templar_ability::Launch, EFFECT_0, SPELL_EFFECT_TRIGGER_SPELL);
+        if (m_scriptSpellId == 680953)
+            OnEffectHitTarget += SpellEffectFn(spell_ascension_templar_ability::Enlighten, EFFECT_ALL, SPELL_EFFECT_ANY);
+        if (m_scriptSpellId == 560097)
+            OnEffectHitTarget += SpellEffectFn(spell_ascension_templar_ability::Devotion, EFFECT_ALL,
+                                               SPELL_EFFECT_ASCENSION_MODIFY_COOLDOWN);
+        if (m_scriptSpellId == 800424)
+            AfterCast += SpellCastFn(spell_ascension_templar_ability::Absolve);
+        if (m_scriptSpellId == 804918)
+            OnEffectHitTarget += SpellEffectFn(spell_ascension_templar_ability::Transcend, EFFECT_ALL,
+                                               SPELL_EFFECT_ASCENSION_MODIFY_COOLDOWN);
     }
 };
 } // namespace

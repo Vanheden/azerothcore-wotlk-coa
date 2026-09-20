@@ -10,9 +10,11 @@
 #include "SpellAuraEffects.h"
 #include "SpellAuras.h"
 #include "SpellMgr.h"
+#include "SpellScript.h"
 #include "TemporarySummon.h"
 #include "ThreatManager.h"
 #include <algorithm>
+#include <cstdlib>
 namespace AscensionXoroth
 {
 void Summon(Player* player, uint32 entry, Position const& position, uint32 duration)
@@ -82,6 +84,10 @@ struct npc_ascension_xoroth_summon : public ScriptedAI
             me->SetReactState(REACT_DEFENSIVE);
             if (me->GetEntry() == 50301)
             {
+                // This TempSummon bypasses SetMinion; Firebolt still needs player target and immunity rules.
+                me->m_ControlledByPlayer = true;
+                me->SetUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED);
+                me->SetByteValue(UNIT_FIELD_BYTES_2, 1, player->GetByteValue(UNIT_FIELD_BYTES_2, 1));
                 State(player).imps.push_back(me->GetGUID());
                 me->GetThreatMgr().RegisterRedirectThreat(706571, owner, 100);
                 Cast(player, me, 800443);
@@ -98,6 +104,16 @@ struct npc_ascension_xoroth_summon : public ScriptedAI
         if (me->GetEntry() == 50268 && summoner && player->IsAlive() && !player->IsInCombat() &&
             player->IsWithinDistInMap(me, 5) && (player == summoner || summoner->IsInRaidWith(player)))
             Cast(player, player, 804775);
+    }
+    void JustDied(Unit*) override
+    {
+        if (me->GetEntry() != 50301) // Only Hellfire Imps, never a timed despawn or another summon.
+            return;
+        if (Player* player = Owner(ObjectAccessor::GetPlayer(*me, owner)); player && player->HasAura(804013))
+        {
+            Reduce(player, 805677, std::abs(Amount(804012, 0, player)));
+            Reduce(player, 524897, std::abs(Amount(804012, 1, player)));
+        }
     }
     void UpdateAI(uint32 diff) override
     {
@@ -146,8 +162,57 @@ struct npc_ascension_xoroth_summon : public ScriptedAI
             DoMeleeAttackIfReady();
     }
 };
+// Sacrificial Circle names owner area aura 805916 as its caster requirement, but no Hellfire Imp applies it
+// (its cost modifier is rebuilt as 805965). Check the living imps instead, and sacrifice only the caster's own
+// imps: the native ally area would also force party members to cast the self-killing helper.
+class spell_ascension_xoroth_sacrificial_circle : public SpellScript
+{
+    PrepareSpellScript(spell_ascension_xoroth_sacrificial_circle);
+    static bool OwnImp(Player const* player, WorldObject const* object)
+    {
+        Creature const* imp = object ? object->ToCreature() : nullptr;
+        return imp && imp->GetEntry() == 50301 && imp->IsAlive() && imp->GetOwnerGUID() == player->GetGUID();
+    }
+    SpellCastResult CheckImps()
+    {
+        Player* player = Owner(GetCaster());
+        if (!player)
+            return SPELL_CAST_OK;
+        float radius = GetSpellInfo()->Effects[EFFECT_0].CalcRadius(player);
+        for (ObjectGuid guid : State(player).imps)
+            if (Creature* imp = ObjectAccessor::GetCreature(*player, guid))
+                if (OwnImp(player, imp) && imp->IsWithinDistInMap(player, radius))
+                    return SPELL_CAST_OK;
+        return SPELL_FAILED_CASTER_AURASTATE;
+    }
+    void SelectImps(std::list<WorldObject*>& targets)
+    {
+        Player* player = Owner(GetCaster());
+        targets.remove_if([player](WorldObject* target) { return !player || !OwnImp(player, target); });
+    }
+    void Sacrifice(SpellEffIndex index)
+    {
+        PreventHitDefaultEffect(index);
+        Player* player = Owner(GetCaster());
+        Creature* imp = GetHitCreature();
+        if (!player || !OwnImp(player, imp))
+            return;
+        // The tooltip adds 25% of each sacrificed imp's maximum health; 706753 heals the master and kills the imp.
+        imp->CastCustomSpell(706753, SPELLVALUE_BASE_POINT0, int32(imp->CountPctFromMaxHealth(25)), player,
+                             TRIGGERED_FULL_MASK);
+    }
+    void Register() override
+    {
+        OnCheckCast += SpellCheckCastFn(spell_ascension_xoroth_sacrificial_circle::CheckImps);
+        OnObjectAreaTargetSelect += SpellObjectAreaTargetSelectFn(spell_ascension_xoroth_sacrificial_circle::SelectImps,
+                                                                  EFFECT_0, TARGET_UNIT_DEST_AREA_ALLY);
+        OnEffectHitTarget += SpellEffectFn(spell_ascension_xoroth_sacrificial_circle::Sacrifice, EFFECT_0,
+                                           SPELL_EFFECT_TRIGGER_SPELL);
+    }
+};
 } // namespace
 void AddSC_AscensionXorothSummons()
 {
     RegisterCreatureAI(npc_ascension_xoroth_summon);
+    RegisterSpellScript(spell_ascension_xoroth_sacrificial_circle);
 }

@@ -6,6 +6,7 @@
 #include "DBCStores.h"
 #include "MotionMaster.h"
 #include "ObjectAccessor.h"
+#include "Opcodes.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "ScriptedCreature.h"
@@ -15,7 +16,10 @@
 #include "SpellMgr.h"
 #include "SpellScript.h"
 #include "TemporarySummon.h"
+#include "WorldPacket.h"
+#include "WorldSession.h"
 #include <algorithm>
+#include <cmath>
 
 namespace AscensionNecromancer
 {
@@ -25,20 +29,93 @@ bool Stationary(uint32 entry)
 {
     return entry == 50132 || entry == 542064 || entry == 575091;
 }
+// Skeletal Archer's Shoot (AttackSpell() 801516) and Skeletal Mage's Frost bolt (801513) already fire
+// every 3s regardless of range, so neither needs to close to melee.
+bool Ranged(uint32 entry)
+{
+    return entry == 50076 || entry == 50075;
+}
+// Only minions that actually follow the caster belong in the formation. 523032 charges 25 yd
+// away the moment it spawns and is skipped by the idle re-follow; 542065 is a corpse marker
+// dropped at an explicit dest that kills itself after 500ms. Offsetting either onto a ring
+// slot only moves its spawn point away from where the spell aimed it, and the slots they
+// hold push the real followers onto wider rings for nothing.
+bool Follows(uint32 entry)
+{
+    return !Stationary(entry) && entry != 523032 && entry != 542065;
+}
+// A follow point is fixed by its distance and its owner-relative angle, so minions that
+// share both converge on one spot. Spread the army over concentric rings instead: six
+// places on the innermost ring and six more on each ring outwards, which keeps the gap
+// between neighbours roughly even. Slot 0 is the stock guardian spot, so a lone minion
+// keeps behaving exactly like an ordinary pet.
+void Formation(uint32 slot, float& distance, float& angle)
+{
+    uint32 ring = 0;
+    uint32 places = 6;
+    // Life Force caps the army at 48, but cost-free minions bypass that budget, so stop
+    // widening after five rings (90 places) and let any excess share the outermost one.
+    while (slot >= places && ring < 4)
+    {
+        slot -= places;
+        places += 6;
+        ++ring;
+    }
+    distance = PET_FOLLOW_DIST + 2.5f * float(ring);
+    // The per-ring twist keeps an outer minion from standing directly behind an inner one.
+    angle = Position::NormalizeOrientation(PET_FOLLOW_ANGLE + float(ring) * 0.4f +
+                                           float(slot % places) * 2.0f * float(M_PI) / float(places));
+}
+// The number of followers already standing in the formation, i.e. the slot the next one is
+// about to occupy. Minions() already drops the stationary entries.
+uint32 Followers(Player* player)
+{
+    uint32 count = 0;
+    for (Creature const* unit : Minions(player))
+        if (Follows(unit->GetEntry()))
+            ++count;
+    return count;
+}
+// A minion's slot is its place among the owner's live followers, so the ring closes up again
+// whenever one of them dies. Counting the same way Followers() does keeps the slot a minion
+// is spawned on and the slot it is re-followed to identical.
+uint32 FormationSlot(Player* player, Creature const* minion)
+{
+    uint32 slot = 0;
+    for (Creature const* other : Minions(player))
+    {
+        if (other == minion)
+            break;
+        if (Follows(other->GetEntry()))
+            ++slot;
+    }
+    return slot;
+}
+// The buff a Champion gives its owner while it lives: an owner-area aura, so it ends with the Champion.
+uint32 ChampionAura(uint32 entry)
+{
+    switch (entry)
+    {
+    case 500482:
+        return 805050; // Gravebound: redirects damage taken to the Champion
+    case 500484:
+        return 807812; // Icebound: silence/interrupt immunity and reduced pushback
+    default:
+        return 0;
+    }
+}
 uint32 AttackSpell(uint32 entry)
 {
     switch (entry)
     {
     case 50067:
-        return 707598;
+        return 805976; // Putrid Claw; Command: Gargoyle (707598) is cast on order only
+    case 500650:
+        return 572211; // Banshee Drain, a 12s channel that burns the target's mana
     case 50075:
         return 801513;
     case 50076:
         return 801516;
-    case 500650:
-        return 822074;
-    case 50323:
-        return 822074;
     case 50177:
         return 801513;
     case 500483:
@@ -169,10 +246,64 @@ bool Summon(Player* player, uint32 spell, Unit* target, Position const& position
                     return created;
                 }
                 Position point = position;
-                player->MovePositionToFirstCollision(point, 1.5f + i * 0.5f, float(i) * 2.4f);
+                bool stationary = Stationary(row.creature);
+                // The intra-cast index is 0 for every single-minion Raise, so it cannot
+                // separate minions raised one cast at a time. Take an army-wide slot:
+                // Followers() is the number of live minions that hold a formation slot,
+                // i.e. the index this one is about to occupy, and it self-increments
+                // because IsSummonedBy registers each creature synchronously inside
+                // SummonCreature.
+                float distance = 1.5f + i * 0.5f;
+                float angle = float(i) * 2.4f;
+                if (Follows(row.creature))
+                    Formation(Followers(player), distance, angle);
+                bool const march = row.creature == 523032;
+                Position aim;
+                if (march)
+                {
+                    // March of the Dead is aimed at the cast target, the selected or attacked enemy or a ground point;
+                    // otherwise the nearest enemy within 30 yards. With none the charges walk straight ahead.
+                    Unit* enemy = target && player->IsValidAttackTarget(target) ? target : nullptr;
+                    if (!enemy)
+                        if (Unit* selected = player->GetSelectedUnit())
+                            if (player->IsValidAttackTarget(selected))
+                                enemy = selected;
+                    if (!enemy)
+                        enemy = player->GetVictim();
+                    if (!enemy)
+                    {
+                        float best = 30.0f;
+                        for (Unit* nearby : Nearby(player, best))
+                            if (player->IsValidAttackTarget(nearby) && player->GetExactDist(nearby) < best)
+                            {
+                                best = player->GetExactDist(nearby);
+                                enemy = nearby;
+                            }
+                    }
+                    if (enemy)
+                        aim = enemy->GetPosition();
+                    else if (player->GetExactDist2d(&position) > 3.0f)
+                        aim = position;
+                    else
+                    {
+                        aim = player->GetPosition();
+                        player->MovePositionToFirstCollision(aim, 25.0f, 0.0f);
+                    }
+                    // The charges start side by side in a line facing the aim point.
+                    float const heading = player->GetAbsoluteAngle(aim.GetPositionX(), aim.GetPositionY());
+                    point = player->GetPosition();
+                    point.SetOrientation(heading);
+                    player->MovePositionToFirstCollision(point, 2.0f, heading - player->GetOrientation());
+                    float const lateral = (float(i) - (row.count - 1) / 2.0f) * 1.0f;
+                    point.m_positionX += std::cos(heading + float(M_PI) / 2) * lateral;
+                    point.m_positionY += std::sin(heading + float(M_PI) / 2) * lateral;
+                    point.SetOrientation(heading);
+                }
+                else
+                    player->MovePositionToFirstCollision(point, distance, angle);
                 // Authored 61 is a non-pet guardian: native controlled-list cleanup and
                 // effect 190 work for the army.
-                auto properties = sSummonPropertiesStore.LookupEntry(Stationary(row.creature) ? 64 : 61);
+                auto properties = sSummonPropertiesStore.LookupEntry(stationary ? 64 : 61);
                 if (!properties)
                     return created;
                 TempSummon* unit = player->GetMap()->SummonCreature(row.creature, point, properties,
@@ -186,19 +317,25 @@ bool Summon(Player* player, uint32 spell, Unit* target, Position const& position
                 }
                 unit->SetTempSummonType(lifetime > 0 ? TEMPSUMMON_TIMED_DESPAWN : TEMPSUMMON_DEAD_DESPAWN);
                 created = true;
+                // CreatureAI::EnterEvadeMode re-follows on GetFollowAngle(), so storing the
+                // slot's angle keeps the army spread after every fight, not just at spawn.
+                // The setter lives on Minion, not on the TempSummon SummonCreature returns;
+                // properties 61 builds a Guardian, so the guard is exact, not defensive.
+                if (Follows(row.creature) && unit->IsGuardian())
+                    static_cast<Minion*>(unit)->SetFollowAngle(angle);
                 unit->GetMotionMaster()->Clear();
                 if (row.creature == 523032)
                 {
-                    Position end = point;
-                    unit->MovePositionToFirstCollision(end, 25.0f, 0.0f);
-                    unit->GetMotionMaster()->MovePoint(1, end);
+                    // The charges walk to the target and detonate on arrival (proximity check in the AI).
+                    unit->SetWalk(true);
+                    unit->GetMotionMaster()->MovePoint(1, aim);
                 }
-                else if (Stationary(row.creature))
+                else if (stationary)
                     unit->GetMotionMaster()->MoveIdle();
                 else if (target && player->IsValidAttackTarget(target) && !player->HasAura(500983))
                     unit->AI()->AttackStart(target);
                 else
-                    unit->GetMotionMaster()->MoveFollow(player, 2.0f, float(i) * 2.4f);
+                    unit->GetMotionMaster()->MoveFollow(player, distance, angle);
             }
     Sync(player);
     return created;
@@ -240,6 +377,10 @@ class npc_ascension_necromancer : public ScriptedAI
     uint8 _cost = 0;
     bool _exploded = false;
     float _inheritedSpeed = 1.0f;
+    // The range the script last asked MoveFollow for. GetFollowAngle() is stored on the
+    // minion and survives the core's own re-follows, but the range is not, so it only
+    // exists here; 0 means "no follow of ours is running" and forces a re-issue.
+    float _followRange = 0.0f;
 
     void IsSummonedBy(WorldObject* summoner) override
     {
@@ -260,7 +401,7 @@ class npc_ascension_necromancer : public ScriptedAI
         me->SetCreatorGUID(_owner);
         me->SetFaction(player->GetFaction());
         me->SetReactState(REACT_DEFENSIVE);
-        me->SetCombatMovement(!Stationary(me->GetEntry()));
+        me->SetCombatMovement(!Stationary(me->GetEntry()) && !Ranged(me->GetEntry()));
         State(player).minions.push_back({me->GetGUID(), _spell, _cost});
         me->AddAura(805015, me);
         Scale(player, me, _cost, _inheritedSpeed);
@@ -268,8 +409,14 @@ class npc_ascension_necromancer : public ScriptedAI
         me->SetPower(POWER_MANA, me->GetMaxPower(POWER_MANA));
         if (_cost && player->HasAura(504866))
             player->CastCustomSpell(505224, SPELLVALUE_BASE_POINT0, int32(me->CountPctFromMaxHealth(40)), me, true);
+        // Ghoul Passive Healing targets its caster, so casting it would put the auto-attack heal proc
+        // on the Necromancer; the Ghoul must carry it to heal its master on melee hits.
         if (me->GetEntry() == 50073)
-            Cast(player, me, 805290);
+            player->AddAura(805290, me);
+        if (uint32 occupancy = OccupancyAura(me->GetEntry()))
+            me->CastSpell(me, occupancy, true);
+        if (uint32 champion = ChampionAura(me->GetEntry()))
+            me->CastSpell(me, champion, true);
         for (uint32 ward : {680388, 681460, 681529})
             if (Aura const* active = player->GetAura(ward))
                 if (Aura* copy = player->AddAura(ward, me))
@@ -309,6 +456,12 @@ class npc_ascension_necromancer : public ScriptedAI
         if (key == 1)
             _target = guid;
     }
+    void MovementInform(uint32 type, uint32 id) override
+    {
+        // A Bone Charge detonates where its walk ends, even if the target died on the way.
+        if (me->GetEntry() == 523032 && type == POINT_MOTION_TYPE && id == 1)
+            _events.RescheduleEvent(3, 1ms);
+    }
     void SetData(uint32 key, uint32 value) override
     {
         if (key == 1)
@@ -317,9 +470,39 @@ class npc_ascension_necromancer : public ScriptedAI
     void AttackStart(Unit* target) override
     {
         Player* player = Owner(me);
-        if (player && !Stationary(me->GetEntry()) && !player->HasAura(500983) && target &&
-            player->IsValidAttackTarget(target))
+        if (player && !Stationary(me->GetEntry()) && me->GetEntry() != 523032 && !player->HasAura(500983) &&
+            target && player->IsValidAttackTarget(target))
             ScriptedAI::AttackStart(target);
+    }
+    // Put this minion back on its formation slot. Re-issue only when the slot moved, when
+    // the range was lost or when no follow is running, so the idle tick does not restart
+    // pathing every second.
+    void Regroup(Player* player)
+    {
+        float distance = PET_FOLLOW_DIST;
+        float angle = PET_FOLLOW_ANGLE;
+        Formation(FormationSlot(player, me), distance, angle);
+        if (std::fabs(_followRange - distance) < 0.01f && std::fabs(me->GetFollowAngle() - angle) < 0.01f &&
+            me->GetMotionMaster()->GetCurrentMovementGeneratorType() == FOLLOW_MOTION_TYPE)
+            return;
+        if (me->IsGuardian())
+            static_cast<Minion*>(me)->SetFollowAngle(angle);
+        _followRange = distance;
+        me->GetMotionMaster()->MoveFollow(player, distance, angle);
+    }
+    // CreatureAI::EnterEvadeMode re-follows owned creatures at the hardcoded PET_FOLLOW_DIST.
+    // It restores the stored angle, so nothing the minion carries shows that the ring
+    // distance was dropped, and every minion outside ring 0 falls back onto the innermost
+    // circle as soon as combat ends. Forget the cached range and rebuild the slot instead.
+    void EnterEvadeMode(EvadeReason why) override
+    {
+        ScriptedAI::EnterEvadeMode(why);
+        _followRange = 0.0f;
+        Player* player = Owner(me);
+        if (!player || !me->IsAlive() || !Follows(me->GetEntry()) || player->HasAura(500983) ||
+            me->GetMotionMaster()->GetCurrentMovementGeneratorType() != FOLLOW_MOTION_TYPE)
+            return;
+        Regroup(player);
     }
     void DoAction(int32 action) override
     {
@@ -393,9 +576,17 @@ class npc_ascension_necromancer : public ScriptedAI
             me->GetMotionMaster()->MoveCharge(target->GetPositionX(), target->GetPositionY(), target->GetPositionZ());
             Cast(me, me, 504022);
             break;
+        case 50067:
+            Cast(me, target, 707598);
+            break;
         case 50133:
         case 50303:
             Cast(me, target, 801518);
+            break;
+        case 50323:
+            // Frost-Congealed Barbs is Crypt Fiend's Runic-Power command, not its baseline
+            // attack; AttackSpell() intentionally excludes it so it doesn't auto-fire every tick.
+            Cast(me, target, 822074);
             break;
         default:
             if (uint32 ability = AttackSpell(entry))
@@ -423,11 +614,21 @@ class npc_ascension_necromancer : public ScriptedAI
                 me->SetReactState(passive                   ? REACT_PASSIVE
                                   : player->HasAura(500982) ? REACT_AGGRESSIVE
                                                             : REACT_DEFENSIVE);
+                // A Bone Charge only walks to its target and detonates; it never picks a fight on its own.
+                if (me->GetEntry() == 523032)
+                {
+                    me->SetReactState(REACT_PASSIVE);
+                }
                 if (passive)
                 {
                     me->AttackStop();
                     me->InterruptNonMeleeSpells(false);
-                    me->GetMotionMaster()->MoveIdle();
+                    // Pacified minions stop fighting and walk back to their slot like passive pets, instead of
+                    // standing wherever Grave March left them. Stationary and one-shot summons stay put.
+                    if (Follows(me->GetEntry()))
+                        Regroup(player);
+                    else
+                        me->GetMotionMaster()->MoveIdle();
                 }
                 else if (!me->GetVictim() && me->GetEntry() != 523032)
                 {
@@ -436,18 +637,31 @@ class npc_ascension_necromancer : public ScriptedAI
                         target = player->GetVictim();
                     if (!target && !player->getAttackers().empty())
                         target = *player->getAttackers().begin();
+                    // Assault only picks up enemies: attackable neutral units such as critters are left alone,
+                    // as they are by native aggressive creatures.
                     if (!target && player->HasAura(500982))
                         for (Unit* unit : Nearby(me, 20.0f))
-                            if (player->IsValidAttackTarget(unit) && me->IsWithinLOSInMap(unit))
+                            if (player->IsValidAttackTarget(unit) && player->IsHostileTo(unit) &&
+                                me->IsWithinLOSInMap(unit))
                             {
                                 target = unit;
                                 break;
                             }
                     if (target)
                         AttackStart(target);
-                    else if (!me->IsWithinDistInMap(player, 5.0f))
-                        me->GetMotionMaster()->MoveFollow(player, 2.0f, PET_FOLLOW_ANGLE);
+                    else if (Follows(me->GetEntry()))
+                        // One shared PET_FOLLOW_ANGLE sent the whole army to a single point.
+                        // Re-follow on this minion's own slot instead.
+                        Regroup(player);
                 }
+                // A Skeletal Rogue slips back into stealth whenever it has nothing to fight, including while pacified.
+                // Its combat flag follows the owner's, so it is the lack of a victim and attackers that counts.
+                if (me->GetEntry() == 50078 && me->IsAlive() && !me->GetVictim() && me->getAttackers().empty() &&
+                    !me->HasAuraType(SPELL_AURA_MOD_STEALTH))
+                    if (Aura* stealth = me->AddAura(1784, me))
+                        // The follower must keep pace with its owner, so drop stealth's movement penalty.
+                        if (AuraEffect* slow = stealth->GetEffect(EFFECT_2))
+                            slow->ChangeAmount(0);
                 if (me->GetEntry() == 50132 && player->HasAura(500730) && me->IsWithinDistInMap(player, 3.0f))
                 {
                     State(player).shade = false;
@@ -467,7 +681,8 @@ class npc_ascension_necromancer : public ScriptedAI
                         Cast(me, me, 802353);
                     if (Unit* victim = me->GetVictim())
                         if (uint32 ability = AttackSpell(me->GetEntry()))
-                            Cast(me, victim, ability);
+                            if (!me->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
+                                Cast(me, victim, ability);
                 }
                 _events.ScheduleEvent(2, 3s);
             }
@@ -509,7 +724,7 @@ class npc_ascension_necromancer : public ScriptedAI
                     _events.RescheduleEvent(3, 1ms);
                     break;
                 }
-        if (!player->HasAura(500983) && !Stationary(me->GetEntry()) && UpdateVictim())
+        if (!player->HasAura(500983) && !Stationary(me->GetEntry()) && !Ranged(me->GetEntry()) && UpdateVictim())
             DoMeleeAttackIfReady();
     }
 };
@@ -542,9 +757,53 @@ class spell_ascension_necromancer_summon : public SpellScript
         OnEffectHit += SpellEffectFn(spell_ascension_necromancer_summon::SummonEffect, EFFECT_ALL, SPELL_EFFECT_ANY);
     }
 };
+
+// The core only cancels auras the player owns, and an occupancy aura is owned by its minion. Right-clicking it
+// dismisses the newest living minion of that kind instead.
+class necromancer_minion_dismiss : public ServerScript
+{
+  public:
+    necromancer_minion_dismiss() : ServerScript("necromancer_minion_dismiss", {SERVERHOOK_CAN_PACKET_RECEIVE}) {}
+    bool CanPacketReceive(WorldSession* session, WorldPacket const& packet) override
+    {
+        if (packet.GetOpcode() != CMSG_CANCEL_AURA || packet.size() < sizeof(uint32) || !session)
+            return true;
+        Player* player = Owner(session->GetPlayer());
+        uint32 creature = OccupancyCreature(packet.read<uint32>(0));
+        if (!player || !creature || !player->IsInWorld())
+            return true;
+        auto minions = Minions(player, true);
+        for (auto itr = minions.rbegin(); itr != minions.rend(); ++itr)
+            if ((*itr)->GetEntry() == creature && (*itr)->IsAlive())
+            {
+                (*itr)->DespawnOrUnsummon();
+                Sync(player);
+                break;
+            }
+        return false;
+    }
+};
+
+class npc_ascension_necromancer_script : public GenericCreatureScript<npc_ascension_necromancer>
+{
+public:
+    npc_ascension_necromancer_script() : GenericCreatureScript("npc_ascension_necromancer") {}
+
+    // The Skeletal Smith is a repairer. Its goods list is empty, which the gossip menu would drop as a broken
+    // vendor, so the click opens the vendor window directly and it offers only the repair buttons.
+    bool OnGossipHello(Player* player, Creature* creature) override
+    {
+        if (creature->GetEntry() != 50261)
+            return false;
+        player->PlayerTalkClass->ClearMenus();
+        player->GetSession()->SendListInventory(creature->GetGUID());
+        return true;
+    }
+};
 } // namespace
 void AddAscensionNecromancerSummonScripts()
 {
-    RegisterCreatureAI(npc_ascension_necromancer);
+    new npc_ascension_necromancer_script();
     RegisterSpellScript(spell_ascension_necromancer_summon);
+    new necromancer_minion_dismiss();
 }

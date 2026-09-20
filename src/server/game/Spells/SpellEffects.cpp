@@ -285,6 +285,7 @@ namespace
 constexpr uint32 ASCENSION_EARTHSHAPING_AURA = 680441;
 constexpr uint32 ASCENSION_STATIC_AURA = 803102;
 constexpr uint32 ASCENSION_THUNDER_WARD_AURA = 800098;
+constexpr uint32 ASCENSION_CHARGED_CONDUIT_AURA = 803790;
 
 void ResetAscensionCooldown(Player* player, uint32 spellId, bool resetCategory)
 {
@@ -338,6 +339,12 @@ void ModifyAscensionAuraStacks(Unit* caster, Unit* target, uint32 auraSpellId, i
         if (Player* player = target->ToPlayer())
             if (player->getClass() == CLASS_STORMBRINGER &&
                 player->HasAura(ASCENSION_THUNDER_WARD_AURA))
+                return;
+
+    // Some Static consumers use native stack effects instead of a module cost.
+    if (delta < 0 && auraSpellId == ASCENSION_STATIC_AURA && caster == target)
+        if (Player* player = target->ToPlayer())
+            if (player->getClass() == CLASS_STORMBRINGER && player->HasAura(ASCENSION_CHARGED_CONDUIT_AURA))
                 return;
 
     if (Aura* aura = target->GetAura(auraSpellId))
@@ -2180,6 +2187,13 @@ void Spell::EffectPersistentAA(SpellEffIndex effIndex)
         if (Aura* aura = Aura::TryCreate(m_spellInfo, MAX_EFFECT_MASK, dynObj, caster, &m_spellValue->EffectBasePoints[0]))
         {
             m_spellAura = aura;
+            // Persistent ground effects accept the same explicit duration as unit auras.
+            if (m_spellValue->AuraDuration != 0)
+            {
+                if (m_spellAura->GetMaxDuration() != -1)
+                    m_spellAura->SetMaxDuration(m_spellValue->AuraDuration);
+                m_spellAura->SetDuration(m_spellValue->AuraDuration);
+            }
             m_spellAura->SetTriggeredByAuraSpellInfo(m_triggeredByAuraSpell.spellInfo);
             m_spellAura->_RegisterForTargets();
         }

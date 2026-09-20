@@ -23,9 +23,11 @@ the Scourgebane identity for Eonar. These temporary bonuses do not join the main
 
 Completed player casts of Lunge, Cleave, Condemn and Vindication/Divine Fury grant the corresponding
 Oath. The chain lasts 15 seconds without refresh from subsequent generators and stops at ten grants.
-The local interpretation of the recovered two-Oath passive is a limit of one distinct Oath kind,
-or two with 707755; a new kind replaces the oldest held kind. Stacks of a retained kind can accumulate
-to ten. This interpretation is a reconstruction choice, not an independently verified server rule.
+Every Oath kind is held alongside the others until the chain ends, and each kind's stacks can accumulate
+to ten (#4152). The earlier one-kind limit, raised to two by legacy passive 707755, is gone: no player can
+acquire 707755, so everyone was capped at one kind and Condemn removed Lunge's Oath. The current texts treat
+Oaths as a set — Breakers consume "your Oaths" and Flaming Blade gains the Oaths of each Follow Up in the
+chain — and only Graceful Fighter's stale aura tooltip still reads "up to 2 Oaths".
 
 Breakers consume the chain unless Keeping the Oath is active. Chain expiry clears the Oaths and the
 Zealotry contribution to Upheaval. Aggramar refreshes owned Blade of Faith at ten chain stacks.
@@ -79,11 +81,32 @@ Explicit local choices where the recovered description omits a coefficient:
 - Interdict's additional target: one valid nearby enemy within eight yards and line of sight.
 - Hope copies: owner level, half maximum health and half weapon damage, owner armor and attack speed.
 
+Choices behind the 2026-09-17 audit fixes, where the shutdown tooltip names more than the client data delivers:
+
+- Templar's Might adds Blade of Faith to Condemn's damage-from-caster mask; One-Punch Man adds Righteous Tempest's
+  damage helpers and a matching 20% periodic modifier for Blade of Faith. Oath: Retribution stays outside Combat
+  Training, as its client mask excludes it.
+- Norgannon's Wrath's blast takes Chastise's family bit ("scales with modifiers to Chastise"), debuffs every enemy
+  it hits and ignores absorbs and resistances (tooltip, and the client SpellCustomAttr bit shared with Dragon's
+  Wrath). A missed primary hit roll still cancels the blast.
+- Devotion of Khaz'goroth refunds 0.5 sec on every Libram rank (tooltip and 2025-08-04 changelog) instead of its
+  helper's per-spell values. Aggramar's Rage's crit applies only to its masked Holy abilities; the 2026-01-07
+  changelog's extra Chastise damage has no shutdown data and is not implemented.
+- Fury of Aggramar also doubles Libram of Consecration's extra jump targets through the client data; no tooltip or
+  changelog confirms that, and it is left unchanged.
+
 The 113 coefficient slots preserve normal weapon contributions while adding separately authored terms
 once. The recovered parent values override stale Scourgebane/Tempest/Chakra helpers. Copied-result helpers
 do not gain a second caster coefficient, crit, target modifier or armor pass. Exact SQL bonus suppression
 rows accompany these source paths. Additional-target bases are corrected, and Consecration ranks gain
 one through four jumps beyond the primary target. Changed target selectors rebuild their explicit masks.
+
+Sacred Resistance applies its native 15% armor buff once per completed, non-triggered Reckoning cast,
+including every rank. Armor of Faith triggers only when the caster's Staffguard shield is exhausted
+by damage; expiry, cancellation and dispelling a shield with capacity remaining do not trigger it.
+Its native area damage and threat retain the authored 20% AP and 50% Holy spell-power coefficients
+through pending `rev_20260913_02_templar_passives.sql`. The regression at
+`tests/templar_passives/run.py` reuses the workspace completion fixture in a temporary directory.
 
 ## Summons, movement and installation
 

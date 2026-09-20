@@ -47,11 +47,15 @@
 #include "ScriptMgr.h"
 #include "SocialMgr.h"
 #include "Spell.h"
+#include "StringFormat.h"
+#include "Util.h"
 #include "Vehicle.h"
 #include "WhoListCacheMgr.h"
 #include "World.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
+#include "WorldSessionMgr.h"
+#include <algorithm>
 #include <zlib.h>
 
 #include "Corpse.h"
@@ -84,6 +88,93 @@ void WorldSession::HandleRepopRequestOpcode(WorldPacket& recv_data)
     GetPlayer()->RemovePet(nullptr, PET_SAVE_NOT_IN_SLOT, true);
     GetPlayer()->BuildPlayerRepop();
     GetPlayer()->RepopAtGraveyard();
+}
+
+// Ascension client extension opcode 0x51F. The client's Extensions.dll anti-tamper
+// layer reports local detections here (anti-debug checks, debugger window/process
+// names, injected DLL names, ...). The first string is the alert type such as
+// "AntiDebug" or "DBG_ISDEBUGGERPRESENT"; further fields carry the client process
+// name and local diagnostic values. Later builds append fields, so the payload is
+// read defensively: everything after the alert type is recorded as raw hex for
+// offline inspection instead of being rejected when its shape changes.
+void WorldSession::HandleAnticheatAlert(WorldPacket& recvData)
+{
+    // The whole intake pipeline (log, DB row, GM notice, flood kick) is gated
+    // on the Warden switch so servers can disable client alert collection.
+    if (!sWorld->getBoolConfig(CONFIG_WARDEN_ENABLED))
+        return;
+
+    std::string reason;
+    if (recvData.rpos() + sizeof(uint32) <= recvData.size())
+        recvData >> reason;
+
+    if (reason.empty())
+        return;
+
+    // Bound untrusted client text before logging or storing it.
+    if (reason.size() > 64)
+        reason.resize(64);
+
+    std::string details;
+    if (recvData.rpos() < recvData.size())
+    {
+        size_t const remaining = recvData.size() - recvData.rpos();
+        details = Acore::Impl::ByteArrayToHexStr(recvData.contents() + recvData.rpos(),
+            std::min<size_t>(remaining, 128));
+    }
+
+    ObjectGuid const guid = GetPlayer() ? GetPlayer()->GetGUID() : ObjectGuid::Empty;
+
+    LOG_WARN("anticheat", "{} (account {}, guid {}, ip {}) reported {} ({} bytes): {}",
+        GetPlayerName(), GetAccountId(), guid.ToString(), GetRemoteAddress(), reason, recvData.size(), details);
+
+    // The client can send one alert per detection, and a broken or hostile client can
+    // burst them. Keep the session from flooding the log and the character database.
+    constexpr uint32 ALERT_WINDOW_SECONDS = 10;
+    constexpr uint32 ALERT_WINDOW_LIMIT = 5;
+
+    uint32 const now = uint32(GameTime::GetGameTime().count());
+    if (_timeLastAnticheatAlertWindow == 0 || now - _timeLastAnticheatAlertWindow >= ALERT_WINDOW_SECONDS)
+    {
+        _timeLastAnticheatAlertWindow = now;
+        _anticheatAlertsInWindow = 0;
+    }
+
+    if (++_anticheatAlertsInWindow > ALERT_WINDOW_LIMIT)
+    {
+        // A broken or hostile client is flooding alerts. Disconnect it so the
+        // log and the character database cannot be spammed.
+        LOG_WARN("anticheat", "Account {} (guid {}) exceeded the anticheat alert limit ({} alerts per {}s); disconnecting",
+            GetAccountId(), guid.ToString(), ALERT_WINDOW_LIMIT, ALERT_WINDOW_SECONDS);
+        KickPlayer("Anticheat alert flood");
+        return;
+    }
+
+    // Heads-up for online GMs (security level GAMEMASTER and above). The fork's
+    // RBAC data only carries command permissions (no receive-global-gm-text
+    // permission), so target GMs by security level instead of the ticket path's
+    // RBAC-permission channel.
+    WorldPacket gmData;
+    ChatHandler::BuildChatPacket(gmData, CHAT_MSG_SYSTEM, LANG_UNIVERSAL, nullptr, nullptr, Acore::StringFormat(
+        "[Anticheat] {} (account {}, guid {}) reported {} ({} bytes)",
+        GetPlayerName(), GetAccountId(), guid.ToString(), reason, recvData.size()));
+
+    for (auto const& itr : sWorldSessionMgr->GetAllSessions())
+    {
+        WorldSession* session = itr.second;
+        if (session && session->GetPlayer() && session->GetPlayer()->IsInWorld() &&
+            session->GetSecurity() >= SEC_GAMEMASTER)
+            session->SendPacket(&gmData);
+    }
+
+    CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_INS_PLAYER_ANTICHEAT_ALERT);
+    stmt->SetData(0, GetAccountId());
+    stmt->SetData(1, guid.GetCounter());
+    stmt->SetData(2, GetPlayerName());
+    stmt->SetData(3, reason);
+    stmt->SetData(4, details);
+    stmt->SetData(5, uint32(recvData.size()));
+    CharacterDatabase.Execute(stmt);
 }
 
 void WorldSession::HandleGossipSelectOptionOpcode(WorldPacket& recv_data)
@@ -316,7 +407,9 @@ void WorldSession::HandleWhoOpcode(WorldPacket& recvData)
 
         // check if class matches classmask
         uint8 class_ = target.GetClass();
-        if (!(classmask & (1 << class_)))
+        // Keep the legacy wrapped bit for CoA class 32 without shifting a 32-bit value by 32.
+        uint32 classBit = class_ < 32 ? (1u << class_) : class_ == 32 ? 1u : 0u;
+        if (!(classmask & classBit))
         {
             continue;
         }
@@ -1256,6 +1349,20 @@ void WorldSession::HandleResetInstancesOpcode(WorldPackets::Instance::ResetInsta
 {
     LOG_DEBUG("network", "WORLD: CMSG_RESET_INSTANCES");
 
+    ResetAllDungeons();
+}
+
+// The Ascension portrait menu's "Reset all Dungeons" calls ResetDungeons(), which sends this empty
+// extension opcode instead of CMSG_RESET_INSTANCES.
+void WorldSession::HandleResetDungeonsOpcode(WorldPacket& /*recvData*/)
+{
+    LOG_DEBUG("network", "WORLD: CMSG_RESET_DUNGEONS");
+
+    ResetAllDungeons();
+}
+
+void WorldSession::ResetAllDungeons()
+{
     if (Group* group = _player->GetGroup())
     {
         if (group->IsLeader(_player->GetGUID()))
@@ -1476,12 +1583,9 @@ void WorldSession::HandleCancelMountAuraOpcode(WorldPacket& /*recv_data*/)
 {
     LOG_DEBUG("network", "WORLD: CMSG_CANCEL_MOUNT_AURA");
 
-    //If player is not mounted, so go out :)
-    if (!_player->IsMounted())                              // not blizz like; no any messages on blizz
-    {
-        ChatHandler(this).SendSysMessage(LANG_CHAR_NON_MOUNTED);
+    // A cast can already have dismounted the player before the client's cancel packet arrives.
+    if (!_player->IsMounted())
         return;
-    }
 
     if (_player->IsInFlight())                               // not blizz like; no any messages on blizz
     {

@@ -28,6 +28,7 @@
 #include "SpellAuraEffects.h"
 #include "SpellMgr.h"
 #include <algorithm>
+#include <string_view>
 
 uint32 GetTargetFlagMask(SpellTargetObjectTypes objType)
 {
@@ -1233,6 +1234,18 @@ bool SpellInfo::IsAutocastable() const
 
 bool SpellInfo::ComputeIsStackableWithRanks() const
 {
+    // Aspect ranks share one stance slot; lower ranks must be superseded in the client spell list.
+    constexpr uint32 AspectOfTheStarsRank1 = 800510;
+    constexpr uint32 AspectOfTheStarsRank2 = 803887;
+    constexpr uint32 AspectOfTheStarsRank3 = 803888;
+    if (Id == AspectOfTheStarsRank1 || Id == AspectOfTheStarsRank2 || Id == AspectOfTheStarsRank3)
+        return false;
+
+    // Runemaster tattoos are stance-bar spells whose ranks replace each other, like the Aspects above.
+    constexpr std::string_view RunicTattoos = "Runic Tattoos:";
+    if (SpellName[0] && std::string_view(SpellName[0]).starts_with(RunicTattoos))
+        return false;
+
     if (IsPassive())
         return false;
     if (PowerType != POWER_MANA && PowerType != POWER_HEALTH)

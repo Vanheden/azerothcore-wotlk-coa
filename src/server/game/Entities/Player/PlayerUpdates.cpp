@@ -429,6 +429,7 @@ void Player::Update(uint32 p_time)
         m_delayed_unit_relocation_timer = 0;
         RemoveFromNotify(NOTIFY_VISIBILITY_CHANGED);
     }
+    sScriptMgr->OnPlayerAfterUpdate(this, p_time);
 }
 
 void Player::UpdateMirrorTimers()
@@ -1886,7 +1887,7 @@ void Player::UpdateForQuestWorldObjects()
 void Player::UpdateTitansGrip()
 {
     // 10% damage reduce if 2x2h weapons are used
-    if (!CanTitanGrip())
+    if (HasBurningCommander() || !CanTitanGrip())
         RemoveAurasDueToSpell(49152);
     else if (Aura* aur = GetAura(49152))
         aur->RecalculateAmountOfEffects();

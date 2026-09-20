@@ -591,6 +591,10 @@ void Player::AddQuest(Quest const* quest, Object* questGiver)
         UpdatePvPState();
     }
 
+    // The client caches quest queries per quest ID across characters, so refresh the per-player scaled level
+    if (LocalLevelScaling::QuestEnabled.load(std::memory_order_relaxed))
+        PlayerTalkClass->SendQuestQueryResponse(quest);
+
     SetQuestSlot(log_slot, quest_id, qtime);
 
     m_QuestStatusSave[quest_id] = true;
@@ -1491,7 +1495,12 @@ uint32 Player::CalculateQuestRewardXP(Quest const* quest)
     uint32 xp = uint32(quest->XPValue(level) * GetQuestRate(quest->IsDFQuest()));
 
     // handle SPELL_AURA_MOD_XP_QUEST_PCT auras
-    xp *= GetTotalAuraMultiplier(SPELL_AURA_MOD_XP_QUEST_PCT);
+    bool const recruitAFriend = GetsRecruitAFriendBonus(true);
+    xp *= GetTotalAuraMultiplier(SPELL_AURA_MOD_XP_QUEST_PCT, [recruitAFriend](AuraEffect const* effect)
+    {
+        // CoA's party Aura of Experience explicitly excludes the recruit-a-friend bonus.
+        return effect->GetId() != 818059 || !recruitAFriend;
+    });
 
     return xp;
 }

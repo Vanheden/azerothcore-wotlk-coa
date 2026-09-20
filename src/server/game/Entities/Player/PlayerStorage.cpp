@@ -199,10 +199,10 @@ uint8 Player::FindEquipSlot(ItemTemplate const* proto, uint32 slot, bool swap) c
             break;
         case INVTYPE_2HWEAPON:
             slots[0] = EQUIPMENT_SLOT_MAINHAND;
-            if (CanDualWield() && CanTitanGrip() && proto->SubClass != ITEM_SUBCLASS_WEAPON_POLEARM && proto->SubClass != ITEM_SUBCLASS_WEAPON_STAFF && proto->SubClass != ITEM_SUBCLASS_WEAPON_FISHING_POLE)
+            if (CanDualWield() && CanTitanGrip(proto))
                 if (Item* mhWeapon = GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND))
                     if (ItemTemplate const* mhWeaponProto = mhWeapon->GetTemplate())
-                        if (mhWeaponProto->SubClass != ITEM_SUBCLASS_WEAPON_POLEARM && mhWeaponProto->SubClass != ITEM_SUBCLASS_WEAPON_STAFF && mhWeaponProto->SubClass != ITEM_SUBCLASS_WEAPON_FISHING_POLE)
+                        if (CanTitanGrip(mhWeaponProto))
                             slots[1] = EQUIPMENT_SLOT_OFFHAND;
             break;
         case INVTYPE_TABARD:
@@ -915,6 +915,31 @@ bool Player::IsTotemCategoryCompatiableWith(ItemTemplate const* pProto, uint32 r
             return false;
 
     return true;
+}
+
+InventoryResult Player::BotCanUseItem(ItemTemplate const* proto) const
+{
+    if (proto->Class == ITEM_CLASS_ARMOR && proto->SubClass == ITEM_SUBCLASS_ARMOR_IDOL && !IsClass(CLASS_DRUID, CLASS_CONTEXT_EQUIP_RELIC))
+    {
+        return EQUIP_ERR_YOU_CAN_NEVER_USE_THAT_ITEM;
+    }
+
+    if (proto->Class == ITEM_CLASS_ARMOR && proto->SubClass == ITEM_SUBCLASS_ARMOR_TOTEM && !IsClass(CLASS_SHAMAN, CLASS_CONTEXT_EQUIP_RELIC))
+    {
+        return EQUIP_ERR_YOU_CAN_NEVER_USE_THAT_ITEM;
+    }
+
+    if (proto->Class == ITEM_CLASS_ARMOR && proto->SubClass == ITEM_SUBCLASS_ARMOR_LIBRAM && !IsClass(CLASS_PALADIN, CLASS_CONTEXT_EQUIP_RELIC))
+    {
+        return EQUIP_ERR_YOU_CAN_NEVER_USE_THAT_ITEM;
+    }
+
+    if (proto->Class == ITEM_CLASS_ARMOR && proto->SubClass == ITEM_SUBCLASS_ARMOR_SIGIL && !IsClass(CLASS_DEATH_KNIGHT, CLASS_CONTEXT_EQUIP_RELIC))
+    {
+        return EQUIP_ERR_YOU_CAN_NEVER_USE_THAT_ITEM;
+    }
+
+    return CanUseItem(proto);
 }
 
 InventoryResult Player::CanStoreItem_InSpecificSlot(uint8 bag, uint8 slot, ItemPosCountVec& dest, ItemTemplate const* pProto, uint32& count, bool swap, Item* pSrcItem) const
@@ -2015,14 +2040,14 @@ InventoryResult Player::CanEquipItem(uint8 slot, uint16& dest, Item* pItem, bool
                 }
                 else if (type == INVTYPE_2HWEAPON)
                 {
-                    if (!CanDualWield() || !CanTitanGrip())
+                    if (!CanDualWield() || !CanTitanGrip(pProto))
                         return EQUIP_ERR_CANT_DUAL_WIELD;
                 }
 
                 // Do not allow offhand with main hand polearm, staff or fishing pole
                 if (Item* mhWeapon = GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND))
                     if (ItemTemplate const* mhWeaponProto = mhWeapon->GetTemplate())
-                        if (!CanUseTwoHandWithShield(mhWeaponProto, pProto) &&
+                        if (!CanTitanGrip(mhWeaponProto) && !CanUseTwoHandWithShield(mhWeaponProto, pProto) &&
                             (mhWeaponProto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM ||
                             mhWeaponProto->SubClass == ITEM_SUBCLASS_WEAPON_STAFF ||
                             mhWeaponProto->SubClass == ITEM_SUBCLASS_WEAPON_FISHING_POLE))
@@ -2041,13 +2066,13 @@ InventoryResult Player::CanEquipItem(uint8 slot, uint16& dest, Item* pItem, bool
             {
                 if (eslot == EQUIPMENT_SLOT_OFFHAND)
                 {
-                    if (!CanTitanGrip())
+                    if (!CanTitanGrip(pProto))
                         return EQUIP_ERR_ITEM_CANT_BE_EQUIPPED;
                 }
                 else if (eslot != EQUIPMENT_SLOT_MAINHAND)
                     return EQUIP_ERR_ITEM_CANT_BE_EQUIPPED;
 
-                if (!CanTitanGrip() || (pProto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM || pProto->SubClass == ITEM_SUBCLASS_WEAPON_STAFF || pProto->SubClass == ITEM_SUBCLASS_WEAPON_FISHING_POLE))
+                if (!CanTitanGrip(pProto))
                 {
                     // offhand item must can be stored in inventory for offhand item and it also must be unequipped
                     Item* offItem = GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_OFFHAND);
@@ -6623,19 +6648,9 @@ void Player::_LoadSpells(PreparedQueryResult result)
             uint32 spellId = fields[0].Get<uint32>();
             uint8 specMask = fields[1].Get<uint8>();
 
-            if (CheckSkillLearnedBySpell(spellId))
-                addSpell(spellId, specMask, true);
-            else
-            {
-                // Spell was never addSpell()'d, so removeSpell is often a no-op and would
-                // leave an orphan character_spell row (MySQL 1062 on later re-learn/save).
-                removeSpell(spellId, SPEC_MASK_ALL, false);
-
-                CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_DEL_CHAR_SPELL_BY_SPELL);
-                stmt->SetData(0, GetGUID().GetRawValue());
-                stmt->SetData(1, spellId);
-                CharacterDatabase.Execute(stmt);
-            }
+            // CoA allows any race with any class and its classes share spells across class skill lines, so
+            // SkillRaceClassInfo.dbc cannot decide which spells a character may keep.
+            addSpell(spellId, specMask, true);
         } while (result->NextRow());
     }
 }
@@ -7370,7 +7385,10 @@ void Player::_SaveAuras(CharacterDatabaseTransaction trans, bool logout)
             continue;
 
         Aura* aura = itr->second;
-        if (!logout && aura->GetDuration() < 60 * IN_MILLISECONDS )
+        // Skipping an aura that is about to expire only saves a write, because the delete above already
+        // dropped every stored row. A permanent aura reports duration -1, so it must not be caught by that
+        // test: doing so loses it for good if the realm never reaches a clean logout for this character.
+        if (!logout && !aura->IsPermanent() && aura->GetDuration() < 60 * IN_MILLISECONDS)
             continue;
 
         int32 damage[MAX_SPELL_EFFECTS];

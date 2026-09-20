@@ -333,6 +333,8 @@ class xoroth_casts : public AllSpellScript
         }
         if (Named(info, 805671))
         {
+            if (player->HasActiveSpell(SPELL_DEMONIC_VISAGE))
+                Cast(player, target, SPELL_DEMONIC_VISAGE_SLOW);
             if (player->HasAura(704958))
                 Spread(player, target);
             if (Chance(player, 805703, 0, Count(player, 500906) * 5))
@@ -391,6 +393,9 @@ class xoroth_casts : public AllSpellScript
                 Gain(player, fire);
             if (fire && !refunded)
             {
+                if (fire >= 4 && player->HasAura(805706) && target)
+                    if (Aura* apocalypse = target->GetAura(560817, player->GetGUID()))
+                        apocalypse->SetDuration(apocalypse->GetMaxDuration()); // Claws of Hell.
                 if (player->HasAura(520008) && fire >= 4)
                     Gain(player, 1);
                 if (player->HasAura(704973) && fire == 6 && (Named(info, 800168) || id == 803334))
@@ -430,14 +435,16 @@ class xoroth_casts : public AllSpellScript
                 Cast(player, player, 680729);
             if (id == 801063 && player->HasAura(300395))
                 Cast(player, player, 300394);
-            if (id == 801002)
+            if (id == SPELL_UNLEASH_PESTILENCE)
             {
+                if (player->HasAura(SPELL_WARPATH))
+                    Cast(player, player, SPELL_WARPATH_PROTECTION);
                 Unleash(player, player);
                 if (player->HasAura(704961))
                     if (Pet* pet = player->GetPet(); pet && pet->GetEntry() == 510100)
                         Unleash(player, pet, 1, true);
                 if (Chance(player, 520296, 30000))
-                    Reduce(player, 801002, INT32_MAX);
+                    Reduce(player, SPELL_UNLEASH_PESTILENCE, INT32_MAX);
             }
             if (Pestilence(id) && player->HasAura(300398) && !State(player).timers.HasTimeUntilEvent(300398))
                 if (Pet* pet = player->GetPet(); pet && pet->GetEntry() == 510100)

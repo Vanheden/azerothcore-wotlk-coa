@@ -15,6 +15,12 @@ an empty target set or any successful target prevents this refund. Bellows combi
 The recovered changelog record 69912 (2026-08-01) supplies the miss-refund rule. Blood Frenzy and Stoke
 apply their refunds only to non-refunded spending. Blood and Demonfire are independent resources.
 
+Claws of Hell refreshes the caster's own Unleash Apocalypse on the selected target after spending
+at least four Demonfire without a refund. Triggered casts and another caster's effect do not qualify;
+the existing periodic tick timer is preserved. Fiery Retribution reduces Sacrificial Circle by two
+seconds and Implosion by one second when an owned Hellfire Imp dies. Other summons and timed despawns
+do not qualify. `tests/xoroth_passives/run.py` exercises these callbacks with the workspace fixture.
+
 Skulltaker and Warbringer gain 20% and 18% damage per Demonfire respectively, following record 66622
 (2025-12-22). The other recovered bundle rules are explicit: Flames +50% damage per stack, Hellmaw
 +20% direct/periodic damage, Implosion +100% damage and one additional imp, Melt -4% armor, Suffuse
@@ -91,8 +97,10 @@ with the recovered 60% chance. This does not increase ordinary block chance or c
 The Demon's Blood trait changes the Knight's creature type to Demon for native targeting checks.
 
 The Greater Imp is a native permanent summon pet, with 80 guarded level-stat rows copied from native
-Imp 416 and Firebolt/Imp Rush on its action bar. Temporary imps and Abyssals have owned AI and follow
-or assist their master. Local baseline health is 25%/60% of owner maximum health; temporary weapon
+Imp 416 and Burning Slap/Imp Rush on its action bar. Burning Slap uses its authored three-second cooldown,
+3% base-mana cost and level-scaled base plus native 60% SP and 30% AP coefficients. Old permanent pets have the
+temporary-imps' free Firebolt removed from their spell book and autocast list. Temporary imps and Abyssals
+have owned AI and follow or assist their master. Local baseline health is 25%/60% of owner maximum health; temporary weapon
 damage is level*1.5 + 10% owner AP, and armor follows the owner. Applicable owner bonuses are applied
 once. Imps redirect their threat to the owner. Implosion summons one plus reserved Demonfire; native
 forwarded values retain Imp Gang Boss's extra Call imps. Each cast is capped at twelve summons.

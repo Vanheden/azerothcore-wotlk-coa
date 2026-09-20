@@ -16,6 +16,9 @@ void ApplyContracts(SpellInfo* info)
     if (!info || info->SpellFamilyName != 20)
         return;
     uint32 id = info->Id;
+    // Blood of Mannoroth's sole resource helper must grant all six charges, including from zero.
+    if (id == MannorothFelfury)
+        info->Effects[EFFECT_0].MiscValue = 6;
     auto dummy = [info](uint8 slot) {
         info->Effects[slot].ApplyAuraName = SPELL_AURA_DUMMY;
         info->Effects[slot].TriggerSpell = 0;
@@ -56,6 +59,12 @@ void ApplyContracts(SpellInfo* info)
     {
         info->DurationEntry = sSpellDurationStore.LookupEntry(1);
         info->Effects[2].Effect = 0;
+        // Inner Demon is the only Felsworn button the client DBC leaves out of the shared global
+        // cooldown, so it can be recast without delay and cast during another spell's cooldown.
+        // Ruin, Felwrath, Sunder, Twin Slice and Fel Fireball all use category 133 for 1000 ms.
+        // The matching client record is produced by apps/coa-spells/inner_demon_gcd.py.
+        info->StartRecoveryCategory = 133;
+        info->StartRecoveryTime = 1000;
     }
     for (auto const& rift : FelswornRifts)
         if (id == rift.spell)
@@ -113,8 +122,12 @@ void ApplyContracts(SpellInfo* info)
         dummy(0); // preserve native radius and cooldown, select all eligible allies in the cast hook
     if (id == 800203)
         info->Effects[2].Effect = 0; // mana burn only after a successful interrupt
-    if (id == 92089)
+    if (id == BurningCommander)
+    {
         periodic(1, 3000);
+        // Player checks the authored weapon set directly; native Titan's Grip adds an unrelated damage penalty.
+        info->Effects[EFFECT_2].Effect = 0;
+    }
     if (id == 574145)
         dummy(0);
     if (id == 574150 || id == 804105 || id == 801894)
@@ -224,8 +237,6 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[0].Effect = SPELL_EFFECT_DUMMY;
         info->Effects[0].ApplyAuraName = SPELL_AURA_NONE;
     }
-    if (id == 806109)
-        info->Effects[2].Effect = 0;
     if (id == 706818)
     {
         dummy(0), dummy(1);
@@ -266,6 +277,22 @@ void ApplyContracts(SpellInfo* info)
     }
     if (id == 555742)
         info->AttributesEx2 |= SPELL_ATTR2_CANT_CRIT;
+    // "Damage caused may interrupt the effect": the disorient and its slow carry no damage interrupt
+    // flag, so no hit ever broke them. Both the placed cast and its self-centred version share the text.
+    if (id == 805235 || id == 807590)
+        info->AuraInterruptFlags |= AURA_INTERRUPT_FLAG_TAKE_DAMAGE;
+    if (id == Unphased)
+    {
+        // Effect 1 as authored is aura 107 (ADD_FLAT_MODIFIER) with SPELLMOD_EFFECT1 selecting Inner
+        // Demon's (804216) effect 0 (aura 36, MOD_SHAPESHIFT) - a value nothing reads, so the tooltip's
+        // "reduces spell pushback ... while Inner Demon is active" (#919) is otherwise unimplemented.
+        // Retarget it at a real SPELL_AURA_REDUCE_PUSHBACK on the caster; felsworn_scaling below zeroes
+        // it while Inner Demon is inactive, and aura_ascension_felsworn_lifecycle
+        // (AscensionFelswornAuras.cpp) recalculates it whenever Inner Demon is applied or removed.
+        info->Effects[1].ApplyAuraName = SPELL_AURA_REDUCE_PUSHBACK;
+        info->Effects[1].MiscValue = 0;
+        info->Effects[1].SpellClassMask = flag96(0, 0, 0);
+    }
     info->_InitializeExplicitTargetMask();
 }
 } // namespace AscensionFelsworn

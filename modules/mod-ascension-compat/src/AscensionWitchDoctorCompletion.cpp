@@ -15,6 +15,7 @@
 #include "SpellMgr.h"
 #include "SpellScript.h"
 #include <algorithm>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 
@@ -22,7 +23,7 @@ namespace AscensionWitchDoctor
 {
 namespace
 {
-std::unordered_map<ObjectGuid, DoctorState> states;
+std::unordered_map<ObjectGuid, std::unique_ptr<DoctorState>> states;
 std::mutex stateMutex;
 } // namespace
 
@@ -34,7 +35,10 @@ Player* Owner(Unit const* unit)
 DoctorState& State(Player* player)
 {
     std::lock_guard<std::mutex> lock(stateMutex);
-    return states[player->GetGUID()];
+    // The map is locked for the lookup only: the caller then reads and writes the state with no
+    // lock held. Kept by pointer, the state itself never moves, so an insert for another player
+    // rehashing the map cannot leave that caller writing into freed memory.
+    return *states.try_emplace(player->GetGUID(), std::make_unique<DoctorState>()).first->second;
 }
 void Forget(Player* player)
 {
@@ -206,12 +210,25 @@ void ApplyContracts(SpellInfo* info)
     };
     if (id == Shadowhunter)
         dummy(EFFECT_1);
+    if ((id == ChosenOne || id == MojoHigh) &&
+        info->Effects[EFFECT_0].ApplyAuraName == SPELL_AURA_ADD_FLAT_MODIFIER &&
+        info->Effects[EFFECT_0].MiscValue == SPELLMOD_EFFECT3)
+        info->Effects[EFFECT_0].SpellClassMask = flag96(512, 0, 0); // Mimic Ward's summon count
+    // "Summon a mimic ward" - one, with Chosen One adding the second. The record's summon count reads
+    // as two once the core applies its base-point convention, so the ward always arrived doubled and
+    // Chosen One pushed it to three.
+    if (id == Mimic && info->Effects[EFFECT_2].Effect == SPELL_EFFECT_SUMMON)
+        info->Effects[EFFECT_2].BasePoints = 1;
     if (Family(info, 0, 4))
     {
         // Keep all victims in one cast, including rank coefficients and actual hit accounting.
         info->Effects[EFFECT_0].Effect = SPELL_EFFECT_SCHOOL_DAMAGE;
         info->Effects[EFFECT_0].TriggerSpell = 0;
     }
+    // Each Call of Sseratus summon also triggers The True Spirit's buff, talent or not. Summon() already grants
+    // it per ward when the talent is known.
+    if (id == CallSseratus && info->Effects[EFFECT_1].TriggerSpell == TrueSpiritReady)
+        info->Effects[EFFECT_1].Effect = 0;
     if (id == ShadowhunterCost)
         info->Effects[EFFECT_0].Effect = info->Effects[EFFECT_1].Effect = 0;
     if (id == Spirit)
@@ -349,6 +366,10 @@ void ApplyContracts(SpellInfo* info)
         periodic(EFFECT_1, 500);
     if (id == Mirage)
         info->Effects[EFFECT_1].Effect = 0; // exactly five Spirits from the successful cast
+    if (id == SenjinSwiftness)
+        info->Effects[EFFECT_1].SpellClassMask = flag96(0, 0, 1073741824); // was empty, so its -60s cooldown mod matched every WD spell instead of just Mirage
+    if (id == SenjinWisdom)
+        info->Effects[EFFECT_0].SpellClassMask = flag96(0, 0, 1073741824); // pointed at the wrong classmask word, so its +20s duration mod never matched Mirage
     if (id == RageBrewBuff)
         info->Effects[EFFECT_1].BasePoints = 14;
     if (id == Voice)
@@ -386,6 +407,9 @@ void ApplyContracts(SpellInfo* info)
     {
         info->Effects[EFFECT_1].Effect = 0;
         info->SpellFamilyFlags[1] |= 33554432; // inherits Hex modifiers without becoming the stored Hex
+        info->AttributesEx5 &= ~SPELL_ATTR5_EXTRA_INITIAL_PERIOD; // the leech starts one period after the hit
+        info->StartRecoveryTime = 0;
+        info->StartRecoveryCategory = 0; // off the global cooldown
     }
     if (id == HexfireWrath || id == Umbral)
     {
@@ -508,7 +532,21 @@ void ApplyContracts(SpellInfo* info)
                     effect.TargetA = SpellImplicitTargetInfo(heal ? TARGET_UNIT_TARGET_ALLY : TARGET_UNIT_TARGET_ENEMY);
                     effect.TargetB = SpellImplicitTargetInfo();
                 }
+            // Contracts run after the core caches this mask; keep the explicit recipient of copied effects.
+            info->_InitializeExplicitTargetMask();
         }
+    if (id == JungleSecretsHeal)
+    {
+        // A share of the effective Brew heal, with one explicitly selected recipient per effigy.
+        info->DmgClass = SPELL_DAMAGE_CLASS_NONE;
+        info->AttributesEx2 |= SPELL_ATTR2_CANT_CRIT;
+        info->AttributesEx3 |= SPELL_ATTR3_IGNORE_CASTER_MODIFIERS;
+        info->AscensionInheritsResolvedAmount = true;
+        info->Effects[EFFECT_0].BonusMultiplier = 0.0f;
+        info->Effects[EFFECT_0].TargetA = SpellImplicitTargetInfo(TARGET_UNIT_TARGET_ALLY);
+        info->Effects[EFFECT_0].TargetB = SpellImplicitTargetInfo();
+        info->_InitializeExplicitTargetMask();
+    }
 }
 } // namespace AscensionWitchDoctor
 

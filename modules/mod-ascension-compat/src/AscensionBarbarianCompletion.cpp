@@ -124,7 +124,7 @@ void ApplyContracts(SpellInfo* info)
     if (id == 801783)
     {
         info->Effects[EFFECT_0].BasePoints = 99; // an additional main-hand attack
-        info->Effects[EFFECT_1].Effect = 0; // Fill Level belongs to its owner
+        info->Effects[EFFECT_1].Effect = 0; // Might of Utgarde is gated by the owner's proc callback.
     }
     if (id == 573077 || id == 804771 || id == 500534)
         for (SpellEffectInfo& effect : info->Effects)
@@ -149,6 +149,9 @@ void ApplyContracts(SpellInfo* info)
         cost.SpellClassMask = flag96(65536, 0, 0);
         cost.TargetA = SpellImplicitTargetInfo(TARGET_UNIT_CASTER);
     }
+    if (id == 804337)
+        // The native DBC targets the ~1.5s global cooldown instead of ability cooldowns.
+        info->Effects[EFFECT_0].MiscValue = SPELLMOD_COOLDOWN;
 }
 }
 

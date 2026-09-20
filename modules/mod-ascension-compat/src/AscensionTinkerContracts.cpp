@@ -27,6 +27,10 @@ void ApplyContracts(SpellInfo* info)
     if (!info || info->SpellFamilyName != 34)
         return;
     uint32 id = info->Id;
+    // Overcharged is a beacon-only one-use guard. The native exclusion field also applies it on hit, and it has
+    // no duration, so any spell keeping the field leaves it stuck on the player it hits.
+    if (info->ExcludeTargetAuraSpell == 560711)
+        info->ExcludeTargetAuraSpell = 0;
     if (id == 707495)
     {
         // The former duplicate pet Synergy payload is now supplied by 707278.
@@ -224,6 +228,16 @@ void ApplyContracts(SpellInfo* info)
         for (auto& effect : info->Effects)
             if (effect.Effect)
             {
+                effect.TargetA = SpellImplicitTargetInfo(TARGET_UNIT_TARGET_ALLY);
+                effect.TargetB = SpellImplicitTargetInfo();
+            }
+    // Shield Beacon pulses its armor helper at each ally. Persistent area auras need a dynamic object the beacon
+    // never creates, so the helper applied nothing; apply the aura to the ally directly.
+    if (id == 801256 || (id >= 803804 && id <= 803808))
+        for (auto& effect : info->Effects)
+            if (effect.Effect == SPELL_EFFECT_PERSISTENT_AREA_AURA)
+            {
+                effect.Effect = SPELL_EFFECT_APPLY_AURA;
                 effect.TargetA = SpellImplicitTargetInfo(TARGET_UNIT_TARGET_ALLY);
                 effect.TargetB = SpellImplicitTargetInfo();
             }

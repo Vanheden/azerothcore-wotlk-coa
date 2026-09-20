@@ -9,6 +9,7 @@
 #include "SpellAuras.h"
 #include "SpellMgr.h"
 #include "SpellScript.h"
+#include "Timer.h"
 #include <algorithm>
 #include <array>
 #include <limits>
@@ -19,7 +20,7 @@ using namespace AscensionWitchHunter;
 
 bool Night()
 {
-    uint32 hour = (uint64(GameTime::GetGameTime().count()) / 3600 + 3) % 24;
+    uint32 const hour = Acore::Time::GetHours(GameTime::GetGameTime());
     return hour < 6 || hour >= 18;
 }
 
@@ -130,7 +131,8 @@ class aura_ascension_witch_hunter_lifecycle : public AuraScript
                 {
                     int32 base = effect->GetAmount();
                     Remove();
-                    caster->CastCustomSpell(807683, SPELLVALUE_BASE_POINT0, base, owner, TRIGGERED_FULL_MASK);
+                    caster->CastCustomSpell(SPELL_BRAND_OF_THE_DAMNED_DAMAGE, SPELLVALUE_BASE_POINT0, base, owner,
+                        TRIGGERED_FULL_MASK);
                 }
         }
         if (Family(GetSpellInfo(), 2, 4))
@@ -194,7 +196,7 @@ class aura_ascension_witch_hunter_lifecycle : public AuraScript
             Cast(GetCaster(), owner, 804073);
             owner->RemoveAurasByType(SPELL_AURA_MOD_STEALTH);
         }
-        if (id == 805751 && player)
+        if (id == 805751 && player && player->HasSpell(805767)) // Evasive
             player->CastCustomSpell(805766, SPELLVALUE_AURA_DURATION, GetAura()->GetDuration(), player,
                                     TRIGGERED_FULL_MASK);
         if (id == 504790 && player)
@@ -405,7 +407,7 @@ class witch_hunter_state : public UnitScript
             uint64(damage) + player->CountPctFromMaxHealth(35) >= player->GetHealth())
         {
             player->AddSpellCooldown(681173, 0, 120000);
-            SummonHounds(player, 3, sSpellMgr->GetSpellInfo(681172)->GetDuration(), attacker);
+            SummonHounds(player, 3, sSpellMgr->GetSpellInfo(681172)->GetDuration(), 681172, attacker);
             Reset(player, 500085);
         }
     }

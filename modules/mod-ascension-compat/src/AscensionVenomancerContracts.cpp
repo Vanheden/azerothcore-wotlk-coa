@@ -104,12 +104,19 @@ void ApplyContracts(SpellInfo* info)
         dummy(2);
     }
     if (id == 803216)
-        info->Effects[1].ApplyAuraName = SPELL_AURA_MOD_INCREASE_HEALTH;
+        // SPELL_AURA_230 (HandleAuraModIncreaseMaxHealth, "Blood Pact/Commanding Shout") preserves the
+        // health percentage across this swing; SPELL_AURA_MOD_INCREASE_HEALTH instead deducts the raw
+        // bonus from current HP on removal, so leaving Beetle Form silently ate whatever damage was taken.
+        info->Effects[1].ApplyAuraName = SPELL_AURA_230;
     if (id == 805139)
     {
         info->CasterAuraSpell = Beetle;
         dummy(1); // Summons are controlled by Spider Lord's reviewed cast/auto-attack events.
     }
+    if (id == 804968)
+        // Spider/Beetle are plain auras, not real shapeshift forms, so the native Stances
+        // requirement can never be met; venomancer_spells::OnSpellCheckCast enforces the OR instead.
+        info->Stances = 0;
     if (id == 680800)
         dummy(0); // Empty cooldown selector would otherwise affect every class spell.
     if (id == 706035)
@@ -316,6 +323,9 @@ void ApplyContracts(SpellInfo* info)
     }
     if (id == 503989 || (id >= 503990 && id <= 503994))
         info->StackAmount = 0;
+    if (id == 706037)
+        // "Increases your critical strike chance with Shadow and Nature spells and abilities by 1%."
+        aura(2, SPELL_AURA_MOD_SPELL_CRIT_CHANCE_SCHOOL, 1, SPELL_SCHOOL_MASK_SHADOW | SPELL_SCHOOL_MASK_NATURE);
     info->_InitializeExplicitTargetMask();
 }
 } // namespace AscensionVenomancer

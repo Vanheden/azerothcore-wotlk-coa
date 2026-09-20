@@ -7,7 +7,8 @@
 # Enable the compatibility packet filter.
 AscensionCompat.Enable = 1
 
-# Apply the Ascension protocol settings to remote connections as well as loopback.
+# Apply the Ascension protocol settings to remote connections as well as loopback
+# (world headers, extension opcodes, ping interval, spell-modifier layout, class-10 mapping).
 # Enable only on realms dedicated to the matching Ascension client build.
 # Authentication proofs and packet size checks remain required. Restart to apply.
 AscensionCompat.AllowRemoteClients = 0
@@ -23,9 +24,16 @@ AscensionCompat.MapClass10ToWarrior = 1
 # Log each consumed extension packet during protocol discovery.
 AscensionCompat.LogConsumedPackets = 1
 
-# Directory containing the custom client DBCs used by the collection protocol.
-# Required files: Appearances.dbc, ItemAppearances.dbc, VanityCollection.dbc.
-AscensionCompat.DbcDirectory = "./data/dbc/Ascension"
+# Ascension character screen: enable/disable (activate/deactivate) and the
+# per-account character list sort order.
+# Requests: CMSG 0x072E / 0x072F / 0x0772.
+# Responses: SMSG 0x075E / 0x075F / 0x0760 / 0x076F / 0x0770 / 0x0771.
+AscensionCompat.CharacterSelectionEnable = 1
+
+# Maximum simultaneously active characters per account (1-128).
+# Deactivated characters stay stored, are hidden from the standard character
+# list and can be re-activated later.
+AscensionCompat.CharacterSelectionMaxActive = 10
 
 # Automatically add appearance and vanity entries for items obtained by a character.
 AscensionCompat.AutoCollectAppearances = 1
@@ -52,6 +60,14 @@ AscensionCompat.LearnOwnedCompanions = 1
 # from the first login, including level-one characters. No profession grants.
 AscensionCompat.MaxRidingFromStart = 1
 
+# Give a character that carries none of the three PvP ruleset auras the PvE set at login,
+# because character creation grants no ruleset and the client's selection frame is level- and
+# rested-area gated. The PvE set is the shared marker 1004119 plus 9931032, exactly what pressing
+# "PvE Mode" applies, so the character also gains the +15% kill experience that marker carries and
+# shows its "War Mode" buff alongside "PvE Mode" until the client data is patched.
+# Set to 0 to leave such characters on Ruleset.None instead.
+AscensionCompat.RulesetLoginDefault = 1
+
 # Local solo scaling. A creature below the player-minus-three floor is raised
 # with stock AzerothCore stat curves. Creatures one or two levels below, equal,
 # or higher stay unchanged. Friendly NPCs, pets, critters and triggers are not mobs.
@@ -70,3 +86,20 @@ AscensionCompat.LastExtensionOpcode = 2515
 # Startup-only: solo levels 10-59, three scenes, depths 1-15. Realm level cap is unchanged.
 # Enable only with the reviewed installation package; native gameplay acceptance is still required.
 Ascension.Manastorm.Enable = 0
+
+#
+#    AscensionCompat.LevelScalingMaxLift
+#        Description: How many levels above its own a creature may be lifted by
+#                     LevelScaling. Without a cap, a level 30 player crossing a
+#                     starting zone lifts every creature around to 27, and the
+#                     low level bots fighting them are killed by creatures that
+#                     were never theirs.
+#                     A creature has a single level, broadcast to every client:
+#                     it cannot be 27 for a player and 2 for a bot. Bounding the
+#                     lift is the only compromise between keeping content
+#                     relevant and keeping the world playable for whoever is
+#                     already in it.
+#                     0 disables the cap and restores the original behaviour.
+#        Default:     5
+
+AscensionCompat.LevelScalingMaxLift = 5

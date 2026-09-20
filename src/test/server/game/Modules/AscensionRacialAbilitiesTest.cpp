@@ -49,6 +49,20 @@ TEST(AscensionRacialAbilitiesTest, DraeneiCustomAbilitiesUseTheirAdditionalSkill
     EXPECT_FALSE(AscensionRacialAbilities::CanLearn(gift, RACE_HUMAN, CLASS_FLESHWARDEN));
 }
 
+TEST(AscensionRacialAbilitiesTest, DraeneiSunClericReceivesOnlyTheHybridGift)
+{
+    auto hybrid = RacialAbility(11760, 1024, 3909427200u);
+    hybrid.Spell = AscensionRacialAbilities::SPELL_GIFT_OF_THE_NAARU_HYBRID;
+    auto spellPower = RacialAbility(11760, 1024, 48267264u);
+    spellPower.Spell = 814280;
+    auto attackPower = RacialAbility(11760, 1024, 131072u);
+    attackPower.Spell = 814281;
+    EXPECT_TRUE(AscensionRacialAbilities::CanLearn(hybrid, RACE_DRAENEI, CLASS_SUN_CLERIC));
+    EXPECT_FALSE(AscensionRacialAbilities::CanLearn(spellPower, RACE_DRAENEI, CLASS_SUN_CLERIC));
+    EXPECT_FALSE(AscensionRacialAbilities::CanLearn(attackPower, RACE_DRAENEI, CLASS_SUN_CLERIC));
+    EXPECT_FALSE(AscensionRacialAbilities::CanLearn(hybrid, RACE_HUMAN, CLASS_SUN_CLERIC));
+}
+
 TEST(AscensionRacialAbilitiesTest, PreservesAuthoredResourceVariants)
 {
     auto manaTorrent = RacialAbility(SKILL_RACIAL_BLOODELF, 512, 2376105984u);
@@ -63,6 +77,23 @@ TEST(AscensionRacialAbilitiesTest, PreservesAuthoredResourceVariants)
     EXPECT_TRUE(AscensionRacialAbilities::CanLearn(attackPowerFury, RACE_ORC, CLASS_BARBARIAN));
     EXPECT_FALSE(AscensionRacialAbilities::CanLearn(spellPowerFury, RACE_ORC, CLASS_BARBARIAN));
     EXPECT_TRUE(AscensionRacialAbilities::CanLearn(spellPowerFury, RACE_ORC, CLASS_NECROMANCER));
+}
+
+TEST(AscensionRacialAbilitiesTest, BloodElfWitchHunterReceivesOnlyTheMultiResourceTorrent)
+{
+    auto torrent = RacialAbility(SKILL_RACIAL_BLOODELF, 0, 512);
+    torrent.Spell = AscensionRacialAbilities::SPELL_ARCANE_TORRENT_ALL_RESOURCES;
+    EXPECT_TRUE(AscensionRacialAbilities::CanLearn(torrent, RACE_BLOODELF, CLASS_WITCH_HUNTER));
+    EXPECT_FALSE(AscensionRacialAbilities::CanLearn(torrent, RACE_HUMAN, CLASS_WITCH_HUNTER));
+    EXPECT_FALSE(AscensionRacialAbilities::CanLearn(torrent, RACE_BLOODELF, CLASS_NECROMANCER));
+    torrent.Spell = 814287;
+    EXPECT_FALSE(AscensionRacialAbilities::CanLearn(torrent, RACE_BLOODELF, CLASS_WITCH_HUNTER));
+    torrent.Spell = AscensionRacialAbilities::SPELL_ARCANE_TORRENT_ALL_RESOURCES;
+    torrent.MinSkillLineRank = 2;
+    EXPECT_FALSE(AscensionRacialAbilities::CanLearn(torrent, RACE_BLOODELF, CLASS_WITCH_HUNTER));
+    torrent.MinSkillLineRank = 1;
+    torrent.SupercededBySpell = 123;
+    EXPECT_FALSE(AscensionRacialAbilities::CanLearn(torrent, RACE_BLOODELF, CLASS_WITCH_HUNTER));
 }
 
 TEST(AscensionRacialAbilitiesTest, RejectsUnrelatedSkillsClassesAndNonDefaultAbilities)

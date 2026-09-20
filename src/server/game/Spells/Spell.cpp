@@ -17,6 +17,7 @@
 
 #include "Spell.h"
 #include "ArenaSpectator.h"
+#include "AscensionPooledVitality.h"
 #include "BattlefieldMgr.h"
 #include "Battleground.h"
 #include "CharmInfo.h"
@@ -1855,7 +1856,15 @@ void Spell::SelectImplicitCasterObjectTargets(SpellEffIndex effIndex, SpellImpli
 
 void Spell::SelectImplicitTargetObjectTargets(SpellEffIndex effIndex, SpellImplicitTargetInfo const& targetType)
 {
-    ASSERT((m_targets.GetObjectTarget() || m_targets.GetItemTarget()) && "Spell::SelectImplicitTargetObjectTargets - no explicit object or item target available!");
+    // The explicit target can vanish between a script queuing a triggered cast and the cast
+    // itself (SpellCastTargets::Update no longer finds it on the caster's map). Skip the
+    // effect instead of stopping the whole server on an assertion.
+    if (!m_targets.GetObjectTarget() && !m_targets.GetItemTarget())
+    {
+        LOG_ERROR("spells", "Spell::SelectImplicitTargetObjectTargets - spell {} cast by {} has no explicit object or item target, effect {} skipped",
+            m_spellInfo->Id, m_caster->GetGUID().ToString(), uint32(effIndex));
+        return;
+    }
 
     WorldObject* target = m_targets.GetObjectTarget();
 
@@ -3668,7 +3677,15 @@ SpellCastResult Spell::prepare(SpellCastTargets const* targets, AuraEffect const
     if ((HasTriggeredCastFlag(TRIGGERED_CAST_DIRECTLY) && (!m_spellInfo->IsChanneled() || !m_spellInfo->GetMaxDuration())) ||
         (m_caster->IsPlayer() && m_caster->getClass() == CLASS_NECROMANCER && m_spellInfo->Id == 500991) ||
         (m_caster->IsPlayer() && m_caster->getClass() == CLASS_STARCALLER && m_spellInfo->Id == 800386))
+    {
+        // SPELL_ATTR4_ALLOW_CAST_WHILE_CASTING adds TRIGGERED_CAST_DIRECTLY to ordinary player
+        // casts, which sends them down this branch and past the global cooldown their own
+        // StartRecoveryTime asks for. Real triggered casts carry TRIGGERED_IGNORE_GCD through
+        // TRIGGERED_FULL_MASK and still skip it. Trigger before cast(), which may finish the spell.
+        if (m_spellInfo->HasAttribute(SPELL_ATTR4_ALLOW_CAST_WHILE_CASTING) && !HasTriggeredCastFlag(TRIGGERED_IGNORE_GCD))
+            TriggerGlobalCooldown();
         cast(true);
+    }
     else
     {
         // stealth must be removed at cast starting (at show channel bar)
@@ -5397,7 +5414,11 @@ void Spell::TakePower()
     // health as power used
     if (PowerType == POWER_HEALTH)
     {
-        m_caster->ModifyHealth(-(int32)m_powerCost);
+        int32 spent = m_caster->ModifyHealth(-(int32)m_powerCost);
+        if (spent < 0 && m_caster->IsPlayer() && m_caster->getClass() == CLASS_SON_OF_ARUGAL &&
+            m_spellInfo->SpellFamilyName == 26 && !IsTriggered() &&
+            m_caster->HasAura(AscensionBloodmage::PooledVitalityTalent))
+            SetScriptValue(AscensionBloodmage::PooledVitality, 1);
         return;
     }
 
@@ -6794,6 +6815,10 @@ SpellCastResult Spell::CheckCast(bool strict, uint32* /*param1*/, uint32* /*para
                     // allow always ghost flight spells
                     if (m_originalCaster && m_originalCaster->IsPlayer() && m_originalCaster->IsAlive())
                     {
+                        // No flying in battlegrounds
+                        if (m_originalCaster->ToPlayer()->InBattleground())
+                            return SPELL_FAILED_NOT_HERE;
+
                         Battlefield* Bf = sBattlefieldMgr->GetBattlefieldToZoneId(m_originalCaster->GetZoneId());
                         if (AreaTableEntry const* pArea = sAreaTableStore.LookupEntry(m_originalCaster->GetAreaId()))
                             if ((pArea->flags & AREA_FLAG_NO_FLY_ZONE) || (Bf && !Bf->CanFlyIn()))
@@ -7140,6 +7165,14 @@ bool Spell::CanAutoCast(Unit* target)
 
 SpellCastResult Spell::CheckRange(bool strict)
 {
+    // A companion's synchronous skinning cast uses the same scoped reach as its loot collection.
+    // Spell admission still performs the native skinning/corpse/skill checks below CheckRange.
+    if (IsTriggered() && m_spellInfo->HasEffect(SPELL_EFFECT_SKINNING))
+        if (Player* player = m_caster->ToPlayer())
+            if (Unit* target = m_targets.GetUnitTarget(); target && target->IsCreature() &&
+                player->IsWithinLootDistance(target->ToCreature()))
+                return SPELL_CAST_OK;
+
     // Don't check for instant cast spells
     if (!strict && m_casttime == 0)
         return SPELL_CAST_OK;
@@ -8019,6 +8052,11 @@ bool Spell::UpdatePointers()
     }
     else
         m_CastItem = nullptr;
+
+    // m_weaponItem is taken when the cast starts. A delayed spell can hit after that weapon was unequipped or
+    // destroyed (bots change gear on their own), and the weapon skill update would then read a freed item.
+    if (m_weaponItem)
+        m_weaponItem = m_caster->IsPlayer() ? m_caster->ToPlayer()->GetWeaponForAttack(m_attackType, true) : nullptr;
 
     m_targets.Update(m_caster);
 
@@ -9067,9 +9105,10 @@ void Spell::TriggerGlobalCooldown()
 
     // Only players or controlled units have global cooldown
     if (m_caster->GetCharmInfo())
-        m_caster->GetCharmInfo()->GetGlobalCooldownMgr().AddGlobalCooldown(m_spellInfo, gcd);
+        m_globalCooldownGeneration =
+            m_caster->GetCharmInfo()->GetGlobalCooldownMgr().AddGlobalCooldown(m_spellInfo, gcd);
     else if (m_caster->IsPlayer())
-        m_caster->ToPlayer()->GetGlobalCooldownMgr().AddGlobalCooldown(m_spellInfo, gcd);
+        m_globalCooldownGeneration = m_caster->ToPlayer()->GetGlobalCooldownMgr().AddGlobalCooldown(m_spellInfo, gcd);
 }
 
 void Spell::CancelGlobalCooldown()
@@ -9081,11 +9120,16 @@ void Spell::CancelGlobalCooldown()
     if (m_caster->GetCurrentSpell(CURRENT_GENERIC_SPELL) != this)
         return;
 
+    // Only the cooldown this cast started. A cast-while-casting spell can start a newer one in the same category
+    // while this cast is still in progress, and interrupting this cast must not clear it.
+    if (!m_globalCooldownGeneration)
+        return;
+
     // Only players or controlled units have global cooldown
     if (m_caster->GetCharmInfo())
-        m_caster->GetCharmInfo()->GetGlobalCooldownMgr().CancelGlobalCooldown(m_spellInfo);
+        m_caster->GetCharmInfo()->GetGlobalCooldownMgr().CancelGlobalCooldown(m_spellInfo, m_globalCooldownGeneration);
     else if (m_caster->IsPlayer())
-        m_caster->ToPlayer()->GetGlobalCooldownMgr().CancelGlobalCooldown(m_spellInfo);
+        m_caster->ToPlayer()->GetGlobalCooldownMgr().CancelGlobalCooldown(m_spellInfo, m_globalCooldownGeneration);
 }
 
 void Spell::OnSpellLaunch()

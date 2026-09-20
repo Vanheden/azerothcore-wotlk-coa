@@ -16,6 +16,7 @@
 #include "SpellAuras.h"
 #include "SpellMgr.h"
 #include <algorithm>
+#include <memory>
 #include <mutex>
 #include <tuple>
 #include <unordered_map>
@@ -23,7 +24,7 @@ namespace AscensionVenomancer
 {
 namespace
 {
-std::unordered_map<ObjectGuid, VenomancerState> states;
+std::unordered_map<ObjectGuid, std::unique_ptr<VenomancerState>> states;
 std::mutex stateMutex;
 }
 Player* Owner(Unit const* unit)
@@ -38,7 +39,10 @@ Player* Owner(Unit const* unit)
 VenomancerState& State(Player* player)
 {
     std::lock_guard<std::mutex> lock(stateMutex);
-    return states[player->GetGUID()];
+    // The map is locked for the lookup only: the caller then reads and writes the state with no
+    // lock held. Kept by pointer, the state itself never moves, so an insert for another player
+    // rehashing the map cannot leave that caller writing into freed memory.
+    return *states.try_emplace(player->GetGUID(), std::make_unique<VenomancerState>()).first->second;
 }
 bool Named(SpellInfo const* info, uint32 root)
 {
@@ -252,9 +256,21 @@ void Expose(Player* player, uint32 stacks, bool molt)
     uint32 current = Count(player, Exposed);
     uint32 after = molt ? 15 : std::max(current, std::min(maximum, current + stacks));
     if (Aura* aura = player->GetAura(Exposed))
+    {
+        // Every application restarts the shared stack timer, even when the stacks are already capped.
+        aura->RefreshTimers();
         aura->SetStackAmount(after);
+    }
     else if (Aura* added = player->AddAura(Exposed, player))
         added->SetStackAmount(after);
+    uint32 applied = Count(player, Exposed);
+    if (applied > current && player->HasAura(CharmOfWarding))
+    {
+        SpellInfo const* talent = sSpellMgr->GetSpellInfo(CharmOfWarding);
+        HealInfo heal(player, player, player->CountPctFromMaxHealth((applied - current) * Amount(CharmOfWarding)),
+            talent, talent->GetSchoolMask());
+        player->HealBySpell(heal);
+    }
     if (!molt)
         player->EnergizeBySpell(player, 805100, Amount(805100), POWER_RAGE);
 }

@@ -22,12 +22,38 @@ Acquisition, displayed values, server mechanics and observed combat are separate
    calculations already incorporate weapon/AP terms. Do not add a second coefficient merely because
    `spell_bonus_data` is empty. Maiming Spear ranks 2-7 needed a description correction, not extra AP.
 
+## Client SpellAddon, SpellCustomAttr and charge tables
+
+Decoded from the shutdown client's `Extensions.dll` readers and checked against tooltip goldens (2026-09-17).
+Neither table holds proc chance, PPM, internal cooldowns or AP/SP/RAP coefficients: no field matched any tooltip
+that states them. Proc flags, chance and charges remain the `Spell.dbc` columns; coefficients come from tooltips.
+
+- Cast charges live only in `SpellCharges.dbc` (spell -> category) and `SpellChargesCategory.dbc` (max charges,
+  recharge ms), which the client's `GetSpellCharges` reads; 160 of 173 "N Charges, M sec recharge" tooltips match.
+- `SpellAddon`: f1 spell, f20-f22 copy each effect's aura type (the client uses them only for aura 349, a
+  school-masked cast speed aura). f2-f4 are probably a third misc value per effect; f11-f16 are unknown.
+- `SpellCustomAttr`: f1 spell; f2 uses AzerothCore's `SPELL_ATTR0_CU_*` layout (the client reads only the
+  per-effect negative bits 0x1000-0x4000). Proven client behaviours: f6 0x10 always hastes the GCD, f5 0x800000
+  skips the GCD clamp, f6 0x20000 makes per-second channel cost a percentage of maximum power, f6 0x4000 requires
+  Spider Form. Most other proven bits are UI (learn events, action-bar placement, tooltip lines, loadouts).
+- f5 0x200000 has no client reader, but Dragon's Wrath, Supernova, Witchblaster, Hammer of Twilight, Wraithblade
+  and Norgannon's Wrath's blast carry it and their tooltips pierce absorbs and resistances
+  (`AscensionIgnoreAbsorbAndResistance`). Several of its 130 rows say nothing about it, so apply it per spell.
+- The server can replace rows of all these tables at runtime, so shipped rows bound but do not prove live values.
+
 ## AP, RAP and SP are not interchangeable
 
 - In the reviewed damage path, effect `BonusMultiplier` and SQL `direct_bonus`/`dot_bonus` supply
   spell-power scaling. SQL `ap_bonus`/`ap_dot_bonus` supply attack-power scaling separately.
   An existing SP coefficient does not implement an AP term. Zeroing a SQL SP coefficient changes
   behavior and requires its own justification; do not copy the Barbarian zero-SP policy globally.
+- `Spell.dbc`'s `EffectBonusMultiplier` (f229-231) is the stock 3.3.5a coefficient column and is not a
+  CoA source: CoA authors coefficients in `description`/`tooltip` formula text and left the column
+  untouched, where it agrees with that text on 6.2% of the CoA slots carrying both. Stock and Reborn
+  records keep genuine values. `AscensionStockCoefficients.cpp` clears the field at load for the CoA
+  custom-class spells listed in `AscensionStockCoefficientData.h` (regenerate with
+  `Tools/Generate-CoAStockCoefficients.py`), so for those spells `spell_bonus_data` is the only
+  spell-power/bonus-healing channel and a missing row means no coefficient, not a default one.
 - By default the damage path selects RAP only when `IsRangedWeaponSpell()` is true **and** `DmgClass`
   is not `SPELL_DAMAGE_CLASS_MELEE`. The default-false `UseRangedAttackPowerForDamage` runtime field
   can override only the two damage coefficient stat selectors. Its sole current exact metadata
@@ -286,3 +312,27 @@ unresolved; keep its current first/higher-rank coefficients until evidence estab
   Reject conflicting or extra action slots before installation; retaining failed proposals is not a routine requirement.
 - Retained Tinker proc updates use HitMask 9283 (normal/crit/block/absorb/full block). 9331 would also
   admit dodge/parry. Exercise all native hit bits and retain the scripts' positive-damage filters.
+
+## Aura metadata and stacking groups
+
+- A nonzero raw `ApplyAuraName` in Spell.dbc does not establish an aura when the effect itself is zero.
+  Use native `IsAura`/`HasAura` for proc disable masks and group compatibility. Validate actual bindings,
+  not just a simplified hand-built record with the expected flags.
+- Group IDs are not semantic names. Expand subgroups and execute the native same-effect inference:
+  group 1038 includes a stat-percent subgroup, despite also listing Sanctuary. A damage-taken aura requires
+  a group that actually selects its aura type. Verify largest-only stacking and preservation of independent
+  absorb/stagger effects using the real native group methods.
+
+## "Not implemented" passive reports
+
+Lessons from the Templar audit issues (2026-09-17), which grepped for spell IDs instead of tracing effects.
+
+- Most passives are native spell modifiers or stat auras. Resolve each modifier's family mask to the ranks players
+  actually learn, then follow those spells to the value the module really reads: hard-coded script amounts
+  (Tempest's per-Oath snapshot, Tenacity's mitigation, Scourgebane's roll) and fixed durations bypass them.
+- A passive's talent must exist in `CharacterAdvancement.dbc` (or another grant path) before it is a bug; several
+  reported spells were dead catalog entries with SkillLineAbility acquire method 0.
+- This core ignores aura 290's misc value and class mask, has no handler for effect 192 (reduce remaining
+  cooldown by X%) or aura 214 (periodic damage taken), and generates proc charges from a buff's client proc fields.
+- A passive `APPLY_AURA` effect with an enemy implicit target never applies (Focused). Flat cast time added to an
+  instant spell needs the core's instant-spell skip to allow positive flat modifiers (Holy Light).

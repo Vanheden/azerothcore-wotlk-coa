@@ -1,6 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionTinker.h"
 #include "Creature.h"
+#include "DBCStores.h"
 #include "GameObject.h"
 #include "MotionMaster.h"
 #include "ObjectAccessor.h"
@@ -18,6 +19,11 @@
 #include <algorithm>
 namespace AscensionTinker
 {
+enum TinkerSummonSpell : uint32
+{
+    DestructoBot = 804673
+};
+
 bool Permanent(uint32 entry)
 {
     return entry == 50048 || entry == 500481 || entry == 60671 || entry == 60070 || entry == 60672;
@@ -106,10 +112,19 @@ void Summon(Player* player, Unit* target, uint32 spell, Position const* destinat
     if (!info)
         return;
     uint32 entry = 0, count = 1;
+    SummonPropertiesEntry const* properties = nullptr;
     for (auto const& effect : info->Effects)
         if (effect.Effect == SPELL_EFFECT_SUMMON)
         {
             entry = effect.MiscValue;
+            // Destructo-Bot is a native puppet. Its summon properties arrange
+            // possession and release it on logout, transfer and despawn.
+            if (spell == DestructoBot)
+            {
+                properties = sSummonPropertiesStore.LookupEntry(effect.MiscValueB);
+                if (!properties || properties->Category != SUMMON_CATEGORY_PUPPET)
+                    return;
+            }
             break;
         }
     if (spell == 500535) entry = 226012;
@@ -141,13 +156,11 @@ void Summon(Player* player, Unit* target, uint32 spell, Position const* destinat
             position.Relocate(position.GetPositionX(),position.GetPositionY(),position.GetPositionZ() + 5,position.GetOrientation());
         if (spell == 500236)
             player->MovePositionToFirstCollision(position,1 + n * 1.5f,0);
-        if (TempSummon* device = player->SummonCreature(entry,position,TEMPSUMMON_TIMED_DESPAWN,duration))
+        if (TempSummon* device = player->SummonCreature(entry,position,TEMPSUMMON_TIMED_DESPAWN,duration,0,properties))
         {
             device->AI()->SetData(1,spell);
             if (target)
                 device->AI()->SetGUID(target->GetGUID(),1);
-            if (spell == 804673)
-                device->SetCharmedBy(player,CHARM_TYPE_POSSESS);
         }
     }
     if (spell == 804707 || spell == 805308)
@@ -194,6 +207,15 @@ struct npc_ascension_tinker_pet : PetAI
         if (player && Permanent(me->GetEntry()))
         {
             events.Update(diff);
+            if (!initialized)
+            {
+                // The pet spawns passive, so it would stand beside the Tinker and never fight. Start it defensive
+                // like any other summoned pet; a stance the player picks afterwards is kept.
+                if (me->HasReactState(REACT_PASSIVE))
+                    me->SetReactState(REACT_DEFENSIVE);
+                if (CharmInfo* charmInfo = me->GetCharmInfo())
+                    charmInfo->SetPlayerReactState(me->GetReactState());
+            }
             if (!initialized || events.ExecuteEvent())
             {
                 Scale(player,me,!initialized);
@@ -234,6 +256,14 @@ struct npc_ascension_tinker_device : ScriptedAI
         // Keep the stationary TempSummon AI while participating in that lifecycle.
         player->m_Controlled.insert(me);
         me->SetFaction(player->GetFaction());
+        if (Turret(me->GetEntry()))
+        {
+            // TempSummon skips SetMinion: owner GUID alone still leaves shots
+            // on the creature-vs-creature target and immunity checks.
+            me->m_ControlledByPlayer = true;
+            me->SetUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED);
+            me->SetByteValue(UNIT_FIELD_BYTES_2, 1, player->GetByteValue(UNIT_FIELD_BYTES_2, 1));
+        }
         me->SetReactState(REACT_PASSIVE);
         me->SetCombatMovement(Mobile());
         State(player).summons.insert(me->GetGUID());
@@ -242,6 +272,11 @@ struct npc_ascension_tinker_device : ScriptedAI
         start = previous = me->GetPosition();
         if (!Mobile())
             me->GetMotionMaster()->MoveIdle();
+        // Bomb Ready (500354) is SPELL_EFFECT_APPLY_AREA_AURA_OWNER over 60 yards with no duration, so the
+        // mine holds it and the Tinker receives it while in range. It is the caster aura Remote Detonation
+        // (801798) requires, and it lapses on its own when the mine explodes, dies or despawns.
+        if (me->GetEntry() == 50045 || me->GetEntry() == 50600)
+            Cast(me,me,500354);
         if (me->GetEntry() == 226312)
         {
             Position end = start;
@@ -344,19 +379,12 @@ struct npc_ascension_tinker_device : ScriptedAI
             return target && target->IsAlive() && player->IsValidAttackTarget(target) &&
                 me->IsWithinDistInMap(target,range) && me->CanSeeOrDetect(target) && me->IsWithinLOSInMap(target);
         };
-        if (Unit* target = ObjectAccessor::GetUnit(*me,focus); valid(target))
+        // The shared focus is updated by explicit hostile Tinker casts and by changes to
+        // the player's actual attack victim. It is deliberately not inferred from selection,
+        // combat membership or nearby hostility.
+        if (Unit* target = ObjectAccessor::GetUnit(*me,State(player).focus); valid(target))
             return target;
-        if (Unit* target = player->GetVictim(); valid(target))
-            return target;
-        // Spell and ranged attacks need not set the player's melee victim.
-        if (Unit* target = player->GetSelectedUnit(); valid(target) && player->IsInCombatWith(target))
-            return target;
-        Unit* nearest = nullptr;
-        for (Unit* target : Nearby(me,range))
-            if (valid(target) && (player->IsInCombatWith(target) || player->IsHostileTo(target)) &&
-                (!nearest || me->GetExactDist(target) < me->GetExactDist(nearest)))
-                nearest = target;
-        return nearest;
+        return nullptr;
     }
     void UpdateTurret(Player* player)
     {

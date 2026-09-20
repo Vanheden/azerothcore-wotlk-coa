@@ -1358,6 +1358,19 @@ namespace
                 maxLevel = std::max(maxLevel, uint32(member->GetLevel()));
                 minLevel = std::min(minLevel, uint32(member->GetLevel()));
             }
+            // Challenge rules (e.g. CHALLENGE_RULES_TYPE_NO_MANASTORM) can forbid
+            // entering the Manastorm. The rule logic lives in mod-coa-challenges;
+            // the check is exposed through this core PlayerScript hook.
+            for (Player* member : party)
+            {
+                if (!sScriptMgr->OnPlayerCanEnterManastorm(member))
+                {
+                    // The hook (mod-coa-challenges) already sends the chat
+                    // message; only the client result is sent here.
+                    SendResult(player, EnterResult, "ENTER_MANASTORM_UNKNOWN");
+                    return;
+                }
+            }
             uint8 const mode = uint8(std::min<std::size_t>(party.size() - 1, 3)
                 + (maxLevel >= std::max(60u, sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL)) ? 4 : 0));
             char const* error = nullptr;
@@ -1666,8 +1679,15 @@ namespace
             ObjectGuid const guid = player->GetGUID();
             uint32 const instanceId = run.encounter->instanceId;
             uint32 const depth = run.encounter->depth;
+            // Snapshot XP bonuses before saving the reward; delivery may happen after the buffs expire.
+            bool const recruitAFriend = player->GetsRecruitAFriendBonus(true);
+            float const xpMultiplier = player->GetTotalAuraMultiplier(SPELL_AURA_MOD_XP_PCT,
+                [recruitAFriend](AuraEffect const* effect)
+                {
+                    return effect->GetId() != 818059 || !recruitAFriend;
+                });
             uint32 const xp = mode < 4 ? uint32(sObjectMgr->GetXPForLevel(player->GetLevel()) *
-                (first ? 0.075f : 0.06f)) : 0;
+                (first ? 0.075f : 0.06f) * xpMultiplier) : 0;
             uint64 const token = run.token;
             if (xp)
             {

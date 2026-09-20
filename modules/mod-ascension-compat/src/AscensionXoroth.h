@@ -12,6 +12,15 @@ class Unit;
 class Creature;
 namespace AscensionXoroth
 {
+enum SecondarySpells : uint32
+{
+    SPELL_DEMONIC_VISAGE = 300392,
+    SPELL_DEMONIC_VISAGE_SLOW = 520309,
+    SPELL_UNLEASH_PESTILENCE = 801002,
+    SPELL_WARPATH = 805793,
+    SPELL_WARPATH_PROTECTION = 805792
+};
+
 struct XorothState
 {
     EventMap timers;

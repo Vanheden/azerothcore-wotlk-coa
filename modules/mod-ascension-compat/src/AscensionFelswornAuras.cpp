@@ -80,6 +80,9 @@ class aura_ascension_felsworn_lifecycle : public AuraScript
             for (uint32 talent : {520252, 520253})
                 if (AuraEffect* hide = player->GetAuraEffect(talent, EFFECT_0))
                     hide->ChangeAmount(hide->CalculateAmount(player));
+            // Unphased's pushback-reduction half (effect 1) is only correct while Inner Demon is
+            // active; force it to re-evaluate felsworn_scaling::ModifySpellEffectBaseValue now.
+            RefreshUnphased(player);
             player->UpdateArmor();
         }
         if (id == 520853)
@@ -101,7 +104,7 @@ class aura_ascension_felsworn_lifecycle : public AuraScript
         if (!player || !player->IsAlive())
             return;
         uint32 id = GetId();
-        if (id == 92089 && effect->GetEffIndex() == EFFECT_1)
+        if (id == BurningCommander && effect->GetEffIndex() == EFFECT_1)
         {
             PreventDefaultAction();
             Cast(player, player, 500531);
@@ -194,6 +197,9 @@ class aura_ascension_felsworn_lifecycle : public AuraScript
             for (uint32 talent : {520252, 520253})
                 if (AuraEffect* hide = player->GetAuraEffect(talent, EFFECT_0))
                     hide->ChangeAmount(hide->CalculateAmount(player));
+            // Mirrors Apply(): Unphased's pushback reduction must drop back to zero the moment
+            // Inner Demon ends.
+            RefreshUnphased(player);
             player->UpdateArmor();
         }
         if (id == 520853)

@@ -1131,15 +1131,13 @@ uint32 Unit::DealDamage(Unit* attacker, Unit* victim, uint32 damage, CleanDamage
 
     if (!damage)
     {
-        // Rage from absorbed damage
-        if (cleanDamage && cleanDamage->absorbed_damage)
-        {
-            if (victim->HasActivePowerType(POWER_RAGE))
-                victim->RewardRage(cleanDamage->absorbed_damage, 0, false);
-
-            if (attacker && attacker->HasActivePowerType(POWER_RAGE))
-                attacker->RewardRage(cleanDamage->absorbed_damage, 0, true);
-        }
+        // Rage from absorbed damage. Only the victim is paid here: rage_damage above already carries
+        // the absorbed amount, so a fully absorbed weapon swing has just been rewarded to the attacker
+        // by the melee branch - with its weapon-speed factor - and paying again here doubled it. That
+        // branch is also the one that decides what earns attacker rage at all, so rewarding here would
+        // additionally pay for fully absorbed spells and ranged attacks, which earn none.
+        if (cleanDamage && cleanDamage->absorbed_damage && victim->HasActivePowerType(POWER_RAGE))
+            victim->RewardRage(cleanDamage->absorbed_damage, 0, false);
 
         return 0;
     }
@@ -1208,8 +1206,11 @@ uint32 Unit::DealDamage(Unit* attacker, Unit* victim, uint32 damage, CleanDamage
         if (!attacker || attacker->IsControlledByPlayer() || attacker->IsCreatedByPlayer())
         {
             uint32 unDamage = health < damage ? health : damage;
+            // A minion or guardian summoned by a player fights for that player, so its damage counts as the
+            // player's. Without it a creature killed only by such minions was never lootable or worth experience.
             bool damagedByPlayer = unDamage && attacker && (attacker->IsPlayer() || attacker->m_movedByPlayer != nullptr
-                || attacker->GetCharmerGUID().IsPlayer());
+                || attacker->GetCharmerGUID().IsPlayer()
+                || (attacker->IsControlledByPlayer() && attacker->GetOwnerGUID().IsPlayer()));
 
             uint8 attackerLevel = 0;
             if (damagedByPlayer)
@@ -2746,15 +2747,16 @@ void Unit::CalcHealAbsorb(HealInfo& healInfo)
         // Life For Power converts a fraction of every heal, not a finite twenty-point healing absorb.
         if ((*i)->GetId() == 705746 && healInfo.GetTarget()->getClass() == CLASS_NECROMANCER)
         {
-            int32 converted = CalculatePct(std::max(0, healing - absorbAmount), 20);
-            absorbAmount += converted;
             Unit* target = healInfo.GetTarget();
-            int64 shield = converted;
+            int32 stored = 0;
             if (AuraEffect const* old = target->GetAuraEffect(707194, EFFECT_0))
-                shield += std::max(0, old->GetAmount());
+                stored = std::max(0, old->GetAmount());
+            // The shield cannot grow past the Necromancer's maximum health; healing beyond that is not converted.
+            int32 room = std::max<int32>(0, int32(target->GetMaxHealth()) - stored);
+            int32 converted = std::min(CalculatePct(std::max(0, healing - absorbAmount), 20), room);
+            absorbAmount += converted;
             if (converted)
-                target->CastCustomSpell(707194, SPELLVALUE_BASE_POINT0,
-                    int32(std::min<int64>(shield, INT32_MAX)), target, true);
+                target->CastCustomSpell(707194, SPELLVALUE_BASE_POINT0, stored + converted, target, true);
             continue;
         }
 
@@ -3881,7 +3883,16 @@ uint32 Unit::GetDefenseSkillValue(Unit const* target) const
 float Unit::GetUnitDodgeChance() const
 {
     if (IsPlayer())
-        return ToPlayer()->GetRealDodge(); //GetFloatValue(PLAYER_DODGE_PERCENTAGE);
+    {
+        float dodge = ToPlayer()->GetRealDodge();
+        enum SpiritualReflexesSpells : uint32 { SpiritualReflexes = 705436, SpiritualReflexesAmount = 707454 };
+        // Evaluate health at the roll, so a heal or hit in the same update cannot
+        // leave the conditional dodge bonus active on the wrong side of 35%.
+        if (getClass() == CLASS_REAPER && HealthBelowPct(35) && HasAura(SpiritualReflexes))
+            if (SpellInfo const* helper = sSpellMgr->GetSpellInfo(SpiritualReflexesAmount))
+                dodge += helper->Effects[EFFECT_0].CalcValue(this);
+        return dodge;
+    }
     else
     {
         if (ToCreature()->IsTotem())
@@ -7572,6 +7583,11 @@ ReputationRank Unit::GetFactionReactionTo(FactionTemplateEntry const* factionTem
         }
     }
 
+    return GetFactionReactionTo(factionTemplateEntry, targetFactionTemplateEntry);
+}
+
+ReputationRank Unit::GetFactionReactionTo(FactionTemplateEntry const* factionTemplateEntry, FactionTemplateEntry const* targetFactionTemplateEntry)
+{
     // common faction based check
     if (factionTemplateEntry->IsHostileTo(*targetFactionTemplateEntry))
         return REP_HOSTILE;
@@ -7581,6 +7597,7 @@ ReputationRank Unit::GetFactionReactionTo(FactionTemplateEntry const* factionTem
         return REP_FRIENDLY;
     if (factionTemplateEntry->factionFlags & FACTION_TEMPLATE_FLAG_HATES_ALL_EXCEPT_FRIENDS)
         return REP_HOSTILE;
+
     // neutral by default
     return REP_NEUTRAL;
 }
@@ -8564,7 +8581,8 @@ void Unit::RemoveAllControlled(bool onDeath /*= false*/)
                     if (ts->m_Properties && ts->m_Properties->Type == SUMMON_TYPE_LIGHTWELL)
                         continue;
 
-            if (!(onDeath && !IsPlayer() && target->IsGuardian()))
+            // A dying creature keeps its guardians, but not its pet, which leaves with its master.
+            if (!(onDeath && !IsPlayer() && target->IsGuardian() && !static_cast<Minion*>(target)->IsGuardianPet()))
                 target->ToTempSummon()->UnSummon();
         }
         else
@@ -8731,6 +8749,11 @@ void Unit::SendEnergizeSpellLog(Unit* victim, uint32 spellID, uint32 damage, Pow
 
 void Unit::EnergizeBySpell(Unit* victim, uint32 spellID, uint32 damage, Powers powerType)
 {
+    // NO_ENERGIZING (Inn-Sane family): nullify instant energize effects.
+    if (damage && victim->IsPlayer()
+        && !sScriptMgr->OnPlayerCanEnergize(victim->ToPlayer(), int32(powerType)))
+        damage = 0;
+
     victim->ModifyPower(powerType, damage, false);
 
     // Happiness is internal hunter pet state, not combat assistance — energizing it must not generate threat
@@ -8767,7 +8790,7 @@ float Unit::SpellPctDamageModsDone(Unit* victim, SpellInfo const* spellProto, Da
     }
 
     // Done total percent damage auras
-    float DoneTotalMod = 1.0f;
+    float DoneTotalMod = GetAscensionNormalTuningDamageMultiplier(victim, spellProto->GetSchoolMask());
 
     if (AuraEffect const* drums = GetAuraEffect(570759, EFFECT_0))
         AddPct(DoneTotalMod, drums->GetAmount());
@@ -9284,6 +9307,22 @@ uint32 Unit::SpellDamageBonusDone(Unit* victim, SpellInfo const* spellProto, uin
     return uint32(std::max(tmpDamage, 0.0f));
 }
 
+float Unit::GetAscensionNormalTuningDamageMultiplier(Unit const* victim, uint32 schoolMask) const
+{
+    // Copied aura 341 means damage against monsters (e.g. Frozen Waters 271942
+    // and Fire and Ice 1582385). Enable only the reviewed normal tuning records;
+    // aura 322 and the separately authored PvP tuning remain independent.
+    if (!victim || victim->IsCharmedOwnedByPlayerOrPlayer())
+        return 1.0f;
+
+    return GetTotalAuraMultiplier(SPELL_AURA_ASCENSION_MOD_PVE_DAMAGE_DONE_PCT,
+        [schoolMask](AuraEffect const* effect)
+        {
+            uint32 const id = effect->GetId();
+            return id >= 887000 && id <= 887090 && (effect->GetMiscValue() & schoolMask);
+        });
+}
+
 float Unit::GetHealthBasedDamageTakenMultiplier() const
 {
     // Defiance's live 30-80% reduction belongs to damage calculation, not the
@@ -9312,7 +9351,14 @@ uint32 Unit::SpellDamageBonusTaken(Unit* caster, SpellInfo const* spellProto, ui
 
     // from positive and negative SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN
     // multiplicative bonus, for example Dispersion + Shadowform (0.10*0.85=0.085)
-    TakenTotalMod *= GetTotalAuraMultiplierByMiscMask(SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN, spellProto->GetSchoolMask());
+    // Domination uses copied selector 2: damage from creatures (cf. Thunder Hide 92815).
+    TakenTotalMod *= GetTotalAuraMultiplier(SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN,
+        [caster, spellProto](AuraEffect const* effect)
+        {
+            return (effect->GetMiscValue() & spellProto->GetSchoolMask()) &&
+                (effect->GetId() != 887083 || effect->GetMiscValueB() != 2 ||
+                    (caster && !caster->IsCharmedOwnedByPlayerOrPlayer()));
+        });
     TakenTotalMod *= GetHealthBasedDamageTakenMultiplier();
 
     TakenTotalMod = processDummyAuras(TakenTotalMod);
@@ -10655,7 +10701,7 @@ uint32 Unit::MeleeDamageBonusDone(Unit* victim, uint32 pdamage, WeaponAttackType
     }
 
     // Done total percent damage auras
-    float DoneTotalMod = 1.0f;
+    float DoneTotalMod = GetAscensionNormalTuningDamageMultiplier(victim, damageSchoolMask);
 
     // mods for SPELL_SCHOOL_MASK_NORMAL are already factored in base melee damage calculation
     if (AuraEffect const* drums = GetAuraEffect(570759, EFFECT_0))
@@ -10810,7 +10856,14 @@ uint32 Unit::MeleeDamageBonusTaken(Unit* attacker, uint32 pdamage, WeaponAttackT
     // Taken total percent damage auras
     float TakenTotalMod = 1.0f;
 
-    TakenTotalMod *= GetTotalAuraMultiplierByMiscMask(SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN, damageSchoolMask);
+    // Domination uses copied selector 2: damage from creatures (cf. Thunder Hide 92815).
+    TakenTotalMod *= GetTotalAuraMultiplier(SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN,
+        [attacker, damageSchoolMask](AuraEffect const* effect)
+        {
+            return (effect->GetMiscValue() & damageSchoolMask) &&
+                (effect->GetId() != 887083 || effect->GetMiscValueB() != 2 ||
+                    (attacker && !attacker->IsCharmedOwnedByPlayerOrPlayer()));
+        });
     TakenTotalMod *= GetHealthBasedDamageTakenMultiplier();
 
     // .. taken pct (special attacks)
@@ -13102,7 +13155,18 @@ void Unit::RemoveFromWorld()
         if (GetCharmerGUID())
         {
             LOG_FATAL("entities.unit", "Unit {} has charmer guid when removed from world", GetEntry());
-            ABORT();
+            // Conquest of Azeroth: the Tinker Destructo-Bot (50300) is charmed without a charm
+            // aura, so RemoveCharmAuras leaves it charmed when its summon time runs out. Release
+            // it by hand instead of stopping the whole server.
+            LOG_ERROR("entities.unit", "Unit::RemoveFromWorld - forcing the release of {} from charmer {}",
+                      GetGUID().ToString(), GetCharmerGUID().ToString());
+            RemoveCharmedBy(nullptr);
+            if (GetCharmerGUID())
+            {
+                if (Unit* charmer = GetCharmer())
+                    charmer->SetCharm(this, false);
+                SetGuidValue(UNIT_FIELD_CHARMEDBY, ObjectGuid::Empty);
+            }
         }
 
         if (Unit* owner = GetOwner())
@@ -13131,6 +13195,10 @@ void Unit::CleanupBeforeRemoveFromMap(bool finalCleanup)
 
     if (IsInWorld()) // not in world and not being removed atm
         RemoveFromWorld();
+
+    // Abort pending events here: left to ~EventProcessor they run after m_spellMods is already
+    // destroyed, and cancelling a SpellEvent then hits freed memory in Player::RestoreSpellMods.
+    m_Events.KillAllEvents(false);
 
     ASSERT(GetGUID());
 
@@ -13304,7 +13372,19 @@ void Unit::ProcSkillsAndReactives(bool isVictim, Unit* target, uint32 procFlag, 
             // On melee based hit/miss/resist/parry/dodge need to update skill (for victim and attacker)
             if (procExtra & (PROC_EX_NORMAL_HIT | PROC_EX_MISS | PROC_EX_RESIST | PROC_EX_PARRY | PROC_EX_DODGE))
             {
-                ToPlayer()->UpdateCombatSkills(target, attType, isVictim, procSpell ? procSpell->m_weaponItem : nullptr);
+                // The spell took its weapon pointer when the cast was checked. An effect of the spell (or of the
+                // spell that triggered it) can destroy or swap that weapon before the hit, so only pass an item
+                // that is still equipped: compare addresses, never read the item itself.
+                Item* weapon = procSpell ? procSpell->m_weaponItem : nullptr;
+                if (weapon)
+                {
+                    Player const* player = ToPlayer();
+                    if (weapon != player->GetWeaponForAttack(BASE_ATTACK, true) &&
+                        weapon != player->GetWeaponForAttack(OFF_ATTACK, true) &&
+                        weapon != player->GetWeaponForAttack(RANGED_ATTACK, true))
+                        weapon = nullptr;
+                }
+                ToPlayer()->UpdateCombatSkills(target, attType, isVictim, weapon);
             }
             // Update defence if player is victim and we block - TODO: confirm that blocked attacks only have a chance to increase defence skill
             else if (isVictim && procExtra & (PROC_EX_BLOCK))
@@ -13737,7 +13817,8 @@ void Unit::RestoreDisplayId()
         handledAuraForced->HandleEffect(this, AURA_EFFECT_HANDLE_SEND_FOR_CLIENT, true);
         return;
     }
-    else if (!shapeshiftAura.empty()) // we've found shapeshift
+
+    if (!shapeshiftAura.empty()) // we've found shapeshift
     {
         // only one such aura possible at a time
         if (uint32 modelId = GetModelForForm(GetShapeshiftForm(), shapeshiftAura.front()->GetId()))
@@ -13745,8 +13826,13 @@ void Unit::RestoreDisplayId()
             SetDisplayId(modelId);
             return;
         }
+
+        // model-less forms (warrior stances, Shadowform, the Ascension "Cursed Form" family) own no display
+        // of their own, so they must not shadow a transform aura - fall through to it instead of reverting
+        // to the native model.
     }
-    else if (handledAura)
+
+    if (handledAura)
     {
         handledAura->HandleEffect(this, AURA_EFFECT_HANDLE_SEND_FOR_CLIENT, true);
         return;
@@ -14755,6 +14841,8 @@ void Unit::Kill(Unit* killer, Unit* victim, bool durabilityLoss, WeaponAttackTyp
             }
         }
 
+        sScriptMgr->OnPlayerbotCheckKillTask(player, victim);
+
         // Dungeon specific stuff, only applies to players killing creatures
         if (creature->GetInstanceId())
         {
@@ -15707,11 +15795,23 @@ void Unit::SendPlaySpellVisual(uint32 id)
     SendMessageToSet(&data, true);
 }
 
+void Unit::SendPlaySpellVisual(ObjectGuid guid, uint32 id)
+{
+    WorldPacket data(SMSG_PLAY_SPELL_VISUAL, 8 + 4);
+    data << guid;
+    data << uint32(id); // SpellVisualKit.dbc index
+    SendMessageToSet(&data, true);
+}
+
 void Unit::SendPlaySpellImpact(ObjectGuid guid, uint32 id)
 {
     WorldPacket data(SMSG_PLAY_SPELL_IMPACT, 8 + 4);
     data << guid;       // target
     data << uint32(id); // SpellVisualKit.dbc index
+
+    if (IsPlayer())
+        ToPlayer()->SendDirectMessage(&data);
+    else
     SendMessageToSet(&data, true);
 }
 

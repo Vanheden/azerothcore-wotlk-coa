@@ -13,13 +13,14 @@
 #include "SpellAuras.h"
 #include "SpellMgr.h"
 #include <algorithm>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 namespace AscensionXoroth
 {
 namespace
 {
-std::unordered_map<ObjectGuid, XorothState> states;
+std::unordered_map<ObjectGuid, std::unique_ptr<XorothState>> states;
 std::mutex stateMutex;
 } // namespace
 Player* Owner(Unit const* unit)
@@ -30,7 +31,10 @@ Player* Owner(Unit const* unit)
 XorothState& State(Player* player)
 {
     std::lock_guard<std::mutex> lock(stateMutex);
-    return states[player->GetGUID()];
+    // The map is locked for the lookup only: the caller then reads and writes the state with no
+    // lock held. Kept by pointer, the state itself never moves, so an insert for another player
+    // rehashing the map cannot leave that caller writing into freed memory.
+    return *states.try_emplace(player->GetGUID(), std::make_unique<XorothState>()).first->second;
 }
 bool Named(SpellInfo const* info, uint32 root)
 {
@@ -207,8 +211,14 @@ void Refresh(Player* player)
     {
         if (!pet->HasAura(520662))
             Cast(player, pet, 520662);
+        // Firebolt is the free triggered attack of temporary Hellfire Imps, not a permanent pet ability.
+        if (pet->HasSpell(800444))
+        {
+            pet->ToggleAutocast(sSpellMgr->GetSpellInfo(800444), false);
+            pet->removeSpell(800444, false);
+        }
         bool learned = false;
-        for (uint32 id : {800444, 630931})
+        for (uint32 id : {630930, 630931})
             if (!pet->HasSpell(id))
             {
                 pet->learnSpell(id);

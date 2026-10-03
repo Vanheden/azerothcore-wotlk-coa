@@ -317,7 +317,7 @@ void WorldSession::SendPacket(WorldPacket const* packet)
 
     if (!m_Socket)
     {
-        if (_socketlessPacketObserver)
+        if (_socketlessPacketObserver && sScriptMgr->CanPacketSend(this, *packet))
             _socketlessPacketObserver(*packet);
         return;
     }
@@ -1432,9 +1432,22 @@ void WorldSession::SetPlayer(Player* player)
 
 void WorldSession::ProcessQueryCallbacks()
 {
+    {
+        std::lock_guard lock(_queuedQueryCallbacksMutex);
+        for (QueryCallback& callback : _queuedQueryCallbacks)
+            _queryProcessor.AddCallback(std::move(callback));
+        _queuedQueryCallbacks.clear();
+    }
+
     _queryProcessor.ProcessReadyCallbacks();
     _transactionCallbacks.ProcessReadyCallbacks();
     _queryHolderProcessor.ProcessReadyCallbacks();
+}
+
+void WorldSession::QueueQueryCallback(QueryCallback&& callback)
+{
+    std::lock_guard lock(_queuedQueryCallbacksMutex);
+    _queuedQueryCallbacks.emplace_back(std::move(callback));
 }
 
 TransactionCallback& WorldSession::AddTransactionCallback(TransactionCallback&& callback)

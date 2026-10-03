@@ -19,6 +19,7 @@
 #define SCRIPT_OBJECT_UNIT_SCRIPT_H_
 
 #include "ScriptObject.h"
+#include <optional>
 #include <vector>
 
 enum UnitHook
@@ -46,6 +47,8 @@ enum UnitHook
     UNITHOOK_ON_UNIT_EXIT_COMBAT,
     UNITHOOK_ON_UNIT_DEATH,
     UNITHOOK_ON_UNIT_SET_SHAPESHIFT_FORM,
+    UNITHOOK_ON_BEFORE_HEAL_ABSORB,
+    UNITHOOK_ON_AFTER_AURA_EFFECT_CALCULATE_AMOUNT,
     UNITHOOK_ON_SEND_AURA_UPDATE,
     UNITHOOK_MODIFY_SPELL_EFFECT_BASE_VALUE,
     UNITHOOK_CAN_UNIT_ATTACK,
@@ -55,6 +58,8 @@ enum UnitHook
 
 enum ReputationRank : uint8;
 class ByteBuffer;
+class HealInfo;
+class AuraEffect;
 struct BuildValuesCachePosPointers;
 
 class UnitScript : public ScriptObject
@@ -65,6 +70,13 @@ protected:
 public:
     // Called when a unit deals healing to another unit
     virtual void OnHeal(Unit* /*healer*/, Unit* /*reciever*/, uint32& /*gain*/) { }
+
+    // Runs once for direct and periodic healing, before absorbs and overhealing.
+    virtual void OnBeforeHealAbsorb(HealInfo& /*healInfo*/) { }
+
+    // Runs after spell-specific calculations and before applying aura stacks.
+    virtual void OnAfterAuraEffectCalculateAmount(AuraEffect const* /*effect*/, Unit* /*caster*/,
+        int32& /*amount*/) { }
 
     // Called when a unit deals damage to another unit
     virtual void OnDamage(Unit* /*attacker*/, Unit* /*victim*/, uint32& /*damage*/) { }
@@ -95,7 +107,9 @@ public:
     virtual void ModifyHealReceived(Unit* /*target*/, Unit* /*healer*/, uint32& /*heal*/, SpellInfo const* /*spellInfo*/) { }
 
     //Called when Damage is Dealt
-    virtual uint32 DealDamage(Unit* /*AttackerUnit*/, Unit* /*pVictim*/, uint32 damage, DamageEffectType /*damagetype*/) { return damage; }
+    virtual uint32 DealDamage(Unit* /*AttackerUnit*/, Unit* /*pVictim*/, uint32 damage,
+                              DamageEffectType /*damagetype*/,
+                              std::optional<uint32>* /*scriptHealthLeechDamage*/) { return damage; }
 
     virtual void OnBeforeRollMeleeOutcomeAgainst(Unit const* /*attacker*/, Unit const* /*victim*/, WeaponAttackType /*attType*/, int32& /*attackerMaxSkillValueForLevel*/, int32& /*victimMaxSkillValueForLevel*/, int32& /*attackerWeaponSkill*/, int32& /*victimDefenseSkill*/, int32& /*crit_chance*/, int32& /*miss_chance*/, int32& /*dodge_chance*/, int32& /*parry_chance*/, int32& /*block_chance*/ ) {   };
 

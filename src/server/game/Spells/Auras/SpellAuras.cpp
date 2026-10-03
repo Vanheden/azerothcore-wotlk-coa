@@ -34,6 +34,7 @@
 #include "Util.h"
 #include "Vehicle.h"
 #include "WorldPacket.h"
+#include <atomic>
 
 /// @todo: this import is not necessary for compilation and marked as unused by the IDE
 //  however, for some reasons removing it would cause a damn linking issue
@@ -351,9 +352,15 @@ Aura* Aura::Create(SpellInfo const* spellproto, uint8 effMask, WorldObject* owne
     return aura;
 }
 
+namespace
+{
+std::atomic<uint64> auraApplySequence{0};
+}
+
 Aura::Aura(SpellInfo const* spellproto, WorldObject* owner, Unit* caster, Item* castItem, ObjectGuid casterGUID, ObjectGuid itemGUID /*= ObjectGuid::Empty*/) :
     m_spellInfo(spellproto), m_casterGuid(casterGUID ? casterGUID : caster->GetGUID()),
     m_castItemGuid(itemGUID ? itemGUID : castItem ? castItem->GetGUID() : ObjectGuid::Empty), m_castItemEntry(castItem ? castItem->GetEntry() : 0), m_applyTime(GameTime::GetGameTime().count()),
+    m_applySequence(auraApplySequence.fetch_add(1, std::memory_order_relaxed)),
     m_owner(owner), m_timeCla(0), m_updateTargetMapInterval(0),
     m_casterLevel(caster ? caster->GetLevel() : m_spellInfo->SpellLevel), m_procCharges(0), m_stackAmount(1),
     m_isRemoved(false), m_isSingleTarget(false), m_isUsingCharges(false), m_triggeredByAuraSpellInfo(nullptr)
@@ -2121,7 +2128,7 @@ void Aura::AddProcCooldown(SpellProcEntry const* procEntry, TimePoint now)
 
 void Aura::ResetProcCooldown()
 {
-    m_procCooldown = std::chrono::steady_clock::now();
+    m_procCooldown = GameTime::SteadyNow();
 }
 
 void Aura::PrepareProcToTrigger(AuraApplication* aurApp, ProcEventInfo& eventInfo, TimePoint now)
@@ -2943,8 +2950,18 @@ void DynObjAura::FillTargetMap(std::map<Unit*, uint8>& targets, Unit* /*caster*/
             continue;
 
         SpellInfo const* spellInfo = GetSpellInfo();
+        SpellEffectInfo const& effect = spellInfo->Effects[effIndex];
         UnitList targetList;
-        if (spellInfo->Effects[effIndex].TargetB.GetTarget() == TARGET_DEST_DYNOBJ_ALLY || spellInfo->Effects[effIndex].TargetB.GetTarget() == TARGET_UNIT_DEST_AREA_ALLY)
+        // CoA: Eldritch Obelisk (560322), Harvesting Grounds (707591), and Deathwind's Spirit Realm
+        // trigger (effect 1, 582526) encode their ally selectors in EffectImplicitTargetA with TargetB unset.
+        // Other spells also use this selector, so keep the exception scoped to these effects.
+        bool const deathwindRank = spellInfo->Id == 800174 || (spellInfo->Id >= 502989 && spellInfo->Id <= 503000);
+        bool const deathwindSpiritRealm = deathwindRank && effIndex == 1 && effect.TriggerSpell == 582526;
+        bool const coaTargetAAlly = (spellInfo->Id == 560322 || spellInfo->Id == 707591 || deathwindSpiritRealm) &&
+            effect.TargetA.GetTarget() == TARGET_UNIT_DEST_AREA_ALLY;
+        bool const targetBAlly = effect.TargetB.GetTarget() == TARGET_DEST_DYNOBJ_ALLY ||
+            effect.TargetB.GetTarget() == TARGET_UNIT_DEST_AREA_ALLY;
+        if (targetBAlly || coaTargetAAlly)
         {
             Acore::AnyFriendlyUnitInObjectRangeCheck u_check(GetDynobjOwner(), dynObjOwnerCaster, radius);
             Acore::UnitListSearcher<Acore::AnyFriendlyUnitInObjectRangeCheck> searcher(GetDynobjOwner(), targetList, u_check);
@@ -2968,6 +2985,9 @@ void DynObjAura::FillTargetMap(std::map<Unit*, uint8>& targets, Unit* /*caster*/
         for (UnitList::iterator itr = targetList.begin(); itr != targetList.end(); ++itr)
         {
             Unit* target = *itr;
+
+            if (deathwindSpiritRealm && !target->HasAura(705404))
+                continue;
 
             Optional<float> collisionHeight = { };
             Optional<float> combatReach = { };

@@ -1330,10 +1330,19 @@ void SpellMgr::LoadSpellInfoCorrections()
         spellInfo->Effects[EFFECT_0].ApplyAuraName = SPELL_AURA_MOD_ATTACKER_MELEE_CRIT_CHANCE;
     });
 
+    // Emberseer Object Visual
+    // The Blackrock Altar ritual drops participants no longer channeling when its 5 second timer expires,
+    // so the channel must outlast that timer or the ritual never casts Emberseer Start.
+    ApplySpellFix({ 16532 }, [](SpellInfo* spellInfo)
+    {
+        spellInfo->DurationEntry = sSpellDurationStore.LookupEntry(1); // 10 seconds
+    });
+
     // Resurrection Sickness
     ApplySpellFix({ 15007 }, [](SpellInfo* spellInfo)
     {
         spellInfo->SpellFamilyName = SPELLFAMILY_GENERIC;
+        spellInfo->AttributesEx4 |= SPELL_ATTR4_AURA_EXPIRES_OFFLINE;
     });
 
     // Luck of the Draw

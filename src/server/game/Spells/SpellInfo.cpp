@@ -29,6 +29,8 @@
 #include "SpellMgr.h"
 #include <algorithm>
 #include <string_view>
+#include <unordered_map>
+#include <vector>
 
 uint32 GetTargetFlagMask(SpellTargetObjectTypes objType)
 {
@@ -364,6 +366,14 @@ bool SpellEffectInfo::IsEffect(SpellEffects effectName) const
 
 uint32 SpellEffectInfo::GetItemArmorSubclassMask() const
 {
+    if (_spellInfo && _spellInfo->SpellFamilyName == 37 &&
+        (_spellInfo->Id == 706161 || _spellInfo->Id == 707808))
+        return EffectIndex == EFFECT_2 && IsAura(SPELL_AURA_MOD_BASE_RESISTANCE_PCT) &&
+            MiscValue == SPELL_SCHOOL_MASK_NORMAL && MiscValueB == 24 ? 24 : 0;
+    if (_spellInfo && _spellInfo->SpellFamilyName == 36 &&
+        (_spellInfo->Id == 300560 || _spellInfo->Id == 301352))
+        return EffectIndex == EFFECT_0 && IsAura(SPELL_AURA_MOD_BASE_RESISTANCE_PCT) &&
+            MiscValue == SPELL_SCHOOL_MASK_NORMAL && MiscValueB == 24 ? 24 : 0;
     if (_spellInfo && _spellInfo->SpellFamilyName == 35 &&
         (_spellInfo->Id == 706955 || _spellInfo->Id == 707872))
         return EffectIndex == EFFECT_0 && IsAura(SPELL_AURA_MOD_BASE_RESISTANCE_PCT) &&
@@ -1246,6 +1256,11 @@ bool SpellInfo::ComputeIsStackableWithRanks() const
     if (SpellName[0] && std::string_view(SpellName[0]).starts_with(RunicTattoos))
         return false;
 
+    // Pyromancer Ascensions (Executus, Ragnaros) are stance-bar spells whose ranks replace each other.
+    constexpr std::string_view Ascensions = "Ascension of ";
+    if (SpellName[0] && std::string_view(SpellName[0]).starts_with(Ascensions))
+        return false;
+
     if (IsPassive())
         return false;
     if (PowerType != POWER_MANA && PowerType != POWER_HEALTH)
@@ -1455,6 +1470,23 @@ uint8 SpellInfo::CalcMaxAuraStacks(Unit* caster) const
     return uint8(std::clamp(maximum, 1.0f, 255.0f));
 }
 
+namespace
+{
+    // Ascension names the targets of a modifier without a class mask in SpellAffect.dbc; a negative target
+    // stands for every rank of the chain that starts with that spell.
+    std::unordered_map<uint32, std::vector<int32>> const& SpellAffectTargets()
+    {
+        static std::unordered_map<uint32, std::vector<int32>> const targets = []
+        {
+            std::unordered_map<uint32, std::vector<int32>> byModifier;
+            for (SpellAffectEntry const* entry : sSpellAffectStore)
+                byModifier[entry->ModifierSpellID].push_back(int32(entry->AffectedSpellID));
+            return byModifier;
+        }();
+        return targets;
+    }
+}
+
 bool SpellInfo::IsAffectedBySpellMods() const
 {
     return !(AttributesEx3 & SPELL_ATTR3_IGNORE_CASTER_MODIFIERS);
@@ -1469,8 +1501,16 @@ bool SpellInfo::IsAffectedBySpellMod(SpellModifier const* mod) const
         mod->spellId == 705780 && mod->op == SPELLMOD_JUMP_TARGETS && mod->type == SPELLMOD_FLAT &&
         mod->mask == flag96(128, 0, 0);
 
+    bool const bloodFueledAbsorb = Id == 560361 && mod->spellId == 705416 && mod->op == SPELLMOD_EFFECT1 &&
+        mod->type == SPELLMOD_PCT;
+
+    // Spirit Eclipse's splash damage is snapshotted from its parent aura, so the splash ignores caster
+    // modifiers. Bwonsamdi's Edge names only the splash; the snapshot applies it explicitly.
+    bool const bwonsamdisEdgeSplash = Id == 802712 && mod->spellId == 712435 && mod->op == SPELLMOD_DAMAGE &&
+        mod->type == SPELLMOD_PCT;
+
     // xinef: dont check duration mod
-    if (mod->op != SPELLMOD_DURATION && !bandageGunTargets)
+    if (mod->op != SPELLMOD_DURATION && !bandageGunTargets && !bloodFueledAbsorb && !bwonsamdisEdgeSplash)
         if (!IsAffectedBySpellMods())
             return false;
 
@@ -1490,7 +1530,12 @@ bool SpellInfo::IsAffectedBySpellMod(SpellModifier const* mod) const
         switch (mod->spellId)
         {
             case 520682: case 520810: return Id == 520345;
-            case 680600: case 802047: return root == 805116 || root == 804152;
+            case 680600: return root == 805116 || root == 804152;
+            // Unlike 680600, this modifier's two effects are not interchangeable: effect 0
+            // (SPELLMOD_EFFECT1) carries only Hammer of Twilight's classmask, effect 1
+            // (SPELLMOD_EFFECT2) only Entropic Slam's. Route each op to its own root only,
+            // or the other op's SpellModifier instance also matches the wrong target spell.
+            case 802047: return mod->op == SPELLMOD_EFFECT1 ? root == 805116 : root == 804152;
             case 805115: return root == 500720 || root == 806222 || root == 805116;
             case 681102: case 681389: case 806768: return Id == 300277;
             default: break;
@@ -1536,6 +1581,17 @@ bool SpellInfo::IsAffectedBySpellMod(SpellModifier const* mod) const
     if (Id == 504705 && SpellFamilyName == 35 && affectSpell->SpellFamilyName == 35 &&
         (mod->mask & flag96(0, 16384, 0)))
         return true;
+
+    if (!mod->mask)
+    {
+        auto const named = SpellAffectTargets().find(mod->spellId);
+        if (named != SpellAffectTargets().end())
+        {
+            uint32 const firstRank = sSpellMgr->GetFirstSpellInChain(Id);
+            return std::any_of(named->second.begin(), named->second.end(), [&](int32 target)
+                { return target < 0 ? uint32(-target) == firstRank : uint32(target) == Id; });
+        }
+    }
 
     return IsAffected(affectSpell->SpellFamilyName, mod->mask);
 }
@@ -2943,7 +2999,8 @@ uint32 SpellInfo::CalcCastTime(Unit* caster, Spell* spell) const
         return 0;
 
     int32 castTime = serpent ? 1000 : CastTimeEntry->CastTime;
-    if (HasAttribute(SPELL_ATTR0_USES_RANGED_SLOT) && (!IsAutoRepeatRangedSpell()))
+    // Ascension channels ranged-slot spells without a base cast time, such as Tinker's Gatling Gun, at once.
+    if (HasAttribute(SPELL_ATTR0_USES_RANGED_SLOT) && (!IsAutoRepeatRangedSpell()) && (castTime || !IsChanneled()))
         castTime += 500;
 
     if (caster)

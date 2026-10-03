@@ -36,6 +36,7 @@
 #include "CharacterCache.h"
 #include "CharacterDatabaseCleaner.h"
 #include "Chat.h"
+#include "ClassicPlusStats.h"
 #include "CombatLogPackets.h"
 #include "Common.h"
 #include "ConditionMgr.h"
@@ -108,7 +109,8 @@
 
 enum CustomEquipmentSpells : uint32
 {
-    SPELL_BURNING_COMMANDER = 92089
+    SPELL_BURNING_COMMANDER = 92089,
+    SPELL_VALKYR_GRIP = 707072
 };
 
 enum CharacterFlags
@@ -2100,18 +2102,33 @@ void Player::RegenerateHealth()
         HealthIncreaseRate = sWorld->getRate(RATE_HEALTH) * (2.066f - (GetLevel() * 0.066f));
 
     float addvalue = 0.0f;
+    bool const classicStats = sWorld->getBoolConfig(CONFIG_CLASSIC_PLUS_STAT_FORMULAS);
+    float polymorphRegenFraction = 1.0f / 3.0f;
+    float sittingRegenMultiplier = 1.33f;
+    if (classicStats)
+    {
+        polymorphRegenFraction =
+            ClassicPlusStats::PolymorphHealthRegenFraction(getClass(), GetLevel(), polymorphRegenFraction);
+        sittingRegenMultiplier =
+            ClassicPlusStats::SittingHealthRegenMultiplier(getClass(), GetLevel(), sittingRegenMultiplier);
+    }
 
     // polymorphed case
     if (IsPolymorphed())
-        addvalue = (float)GetMaxHealth() / 3;
+        addvalue = GetMaxHealth() * polymorphRegenFraction;
     // normal regen case (maybe partly in combat case)
     else if (!IsInCombat() || HasRegenDuringCombatAura())
     {
-        addvalue = OCTRegenHPPerSpirit() * HealthIncreaseRate;
+        float spiritRegen = OCTRegenHPPerSpirit();
+        if (classicStats)
+            spiritRegen =
+                ClassicPlusStats::HealthRegenPerTick(getClass(), GetLevel(), GetStat(STAT_SPIRIT), spiritRegen);
+
+        addvalue = spiritRegen * HealthIncreaseRate;
 
         if (!IsStandState())
         {
-            addvalue *= 1.33f;
+            addvalue *= sittingRegenMultiplier;
         }
 
         addvalue *= GetTotalAuraMultiplier(SPELL_AURA_MOD_HEALTH_REGEN_PERCENT);
@@ -2138,7 +2155,8 @@ void Player::RegenerateHealth()
 
 void Player::ResetAllPowers()
 {
-    SetHealth(GetMaxHealth());
+    if (IsAlive())
+        SetHealth(GetMaxHealth());
     if (HasActivePowerType(POWER_MANA))
     {
         SetPower(POWER_MANA, GetMaxPower(POWER_MANA));
@@ -2481,10 +2499,14 @@ void Player::GiveXP(uint32 xp, Unit* victim, float group_rate, bool isLFGReward)
     uint8 level = GetLevel();
     sScriptMgr->OnPlayerBeforeGetLevelForXPGain(this, level);
 
+    // A NO_BONUS_EXPERIENCE challenge earns base experience only: no favored, rested
+    // or recruit-a-friend bonus.
+    bool const noBonusExperience = sScriptMgr->OnPlayerHasNoBonusExperience(this);
+
     // Favored experience increase START
     uint32 zone = GetZoneId();
     float favored_exp_mult = 0;
-    if ((zone == AREA_HELLFIRE_PENINSULA || zone == AREA_HELLFIRE_RAMPARTS || zone == AREA_MAGTHERIDONS_LAIR || zone == AREA_THE_BLOOD_FURNACE || zone == AREA_THE_SHATTERED_HALLS) && HasAnyAuras(32096 /*Thrallmar's Favor*/, 32098 /*Honor Hold's Favor*/))
+    if (!noBonusExperience && (zone == AREA_HELLFIRE_PENINSULA || zone == AREA_HELLFIRE_RAMPARTS || zone == AREA_MAGTHERIDONS_LAIR || zone == AREA_THE_BLOOD_FURNACE || zone == AREA_THE_SHATTERED_HALLS) && HasAnyAuras(32096 /*Thrallmar's Favor*/, 32098 /*Honor Hold's Favor*/))
         favored_exp_mult = 0.05f; // Thrallmar's Favor and Honor Hold's Favor
 
     xp = uint32(xp * (1 + favored_exp_mult));
@@ -2498,20 +2520,42 @@ void Player::GiveXP(uint32 xp, Unit* victim, float group_rate, bool isLFGReward)
         if (GetSession()->IsTrialAccount())
             maxLevel = std::min(maxLevel, trialLevelCap);
 
+    // Script level cap (e.g. COA_NO_LEVEL_PAST_REQUIREMENTS holding the player
+    // below the next objective level). It caps the LEVEL-UP only, not the XP:
+    // the bar still fills up to one point short of the gate (the live "99%"),
+    // while no amount of XP can cross it, regardless of multipliers/hook order.
+    uint32 levelCap = maxLevel;
+    if (uint8 scriptMaxLevel = sScriptMgr->GetMaxAllowedLevel(this))
+        levelCap = std::min(levelCap, uint32(scriptMaxLevel));
+
     if (level >= maxLevel)
         return;
 
     if (HasPlayerFlag(PLAYER_FLAGS_PARTIAL_PLAY_TIME))
         xp = std::max(1u, xp / 2);
 
-    uint32 bonus_xp = 0;
-    bool recruitAFriend = GetsRecruitAFriendBonus(true);
-
-    // RaF does NOT stack with rested experience
+    uint32 curXP = GetUInt32Value(PLAYER_XP);
+    uint32 nextLvlXP = GetUInt32Value(PLAYER_NEXT_LEVEL_XP);
+    uint32 bonusLimit = xp;
+    bool recruitAFriend = !noBonusExperience && GetsRecruitAFriendBonus(true);
     if (recruitAFriend)
-        bonus_xp = 2 * xp; // xp + bonus_xp must add up to 3 * xp for RaF; calculation for quests done client-side
-    else
-        bonus_xp = victim ? GetXPRestBonus(xp) : 0; // XP resting bonus
+        bonusLimit = 2 * xp;
+
+    if (levelCap < maxLevel)
+    {
+        // Budget all XP up to the script cap, including its nearly full bar, before
+        // consuming rested XP or reporting the gain. Base XP uses the budget first.
+        uint64 capacity = nextLvlXP;
+        for (uint32 targetLevel = level + 1; targetLevel <= levelCap; ++targetLevel)
+            capacity += sObjectMgr->GetXPForLevel(static_cast<uint8>(targetLevel));
+        uint64 const room = capacity > uint64(curXP) + 1 ? capacity - curXP - 1 : 0;
+        xp = static_cast<uint32>(std::min<uint64>(xp, room));
+        bonusLimit = static_cast<uint32>(std::min<uint64>(bonusLimit, room - xp));
+    }
+
+    // RaF does NOT stack with rested experience. Only spend the rested bonus that fits.
+    uint32 bonus_xp = noBonusExperience ? 0
+        : (recruitAFriend ? bonusLimit : (victim ? GetXPRestBonus(bonusLimit) : 0));
 
     // hooks and multipliers can modify the xp with a zero or negative value
     // check again before sending invalid xp to the client
@@ -2520,22 +2564,23 @@ void Player::GiveXP(uint32 xp, Unit* victim, float group_rate, bool isLFGReward)
 
     SendLogXPGain(xp, victim, bonus_xp, recruitAFriend, group_rate);
 
-    uint32 curXP = GetUInt32Value(PLAYER_XP);
-    uint32 nextLvlXP = GetUInt32Value(PLAYER_NEXT_LEVEL_XP);
-    uint32 newXP = curXP + xp + bonus_xp;
+    uint64 newXP = uint64(curXP) + xp + bonus_xp;
 
-    while (newXP >= nextLvlXP && level < maxLevel)
+    while (newXP >= nextLvlXP && level < levelCap)
     {
         newXP -= nextLvlXP;
 
-        if (level < maxLevel)
-            GiveLevel(level + 1);
+        GiveLevel(level + 1);
 
         level = GetLevel();
         nextLvlXP = GetUInt32Value(PLAYER_NEXT_LEVEL_XP);
     }
 
-    SetUInt32Value(PLAYER_XP, newXP);
+    // Keep the script cap as a final guard if a level-change hook changed the XP threshold.
+    if (level >= levelCap && nextLvlXP && newXP >= nextLvlXP)
+        newXP = nextLvlXP - 1;
+
+    SetUInt32Value(PLAYER_XP, static_cast<uint32>(newXP));
 }
 
 // Update player to next level
@@ -5371,8 +5416,12 @@ float Player::GetMeleeCritFromAgility()
     if (!critBase || !critRatio)
         return 0.0f;
 
-    float crit = critBase->base + GetStat(STAT_AGILITY) * critRatio->ratio;
-    return crit * 100.0f;
+    ClassicPlusStats::StatCurve crit{ critBase->base,
+        ClassicPlusStats::CorrectedClientMeleeCritRatio(pclass, level, critRatio->ratio) };
+    if (sWorld->getBoolConfig(CONFIG_CLASSIC_PLUS_STAT_FORMULAS))
+        crit = ClassicPlusStats::MeleeCrit(pclass, level, crit);
+
+    return (crit.Base + GetStat(STAT_AGILITY) * crit.PerPoint) * 100.0f;
 }
 
 void Player::GetDodgeFromAgility(float& diminishing, float& nondiminishing)
@@ -5424,9 +5473,14 @@ void Player::GetDodgeFromAgility(float& diminishing, float& nondiminishing)
     float base_agility = GetCreateStat(STAT_AGILITY) * GetPctModifierValue(UnitMods(UNIT_MOD_STAT_START + AsUnderlyingType(STAT_AGILITY)), BASE_PCT);
     float bonus_agility = GetStat(STAT_AGILITY) - base_agility;
 
+    float const ratio = ClassicPlusStats::CorrectedClientMeleeCritRatio(pclass, level, dodgeRatio->ratio);
+    ClassicPlusStats::StatCurve dodge{ dodge_base[fallbackClassIndex], ratio * crit_to_dodge[fallbackClassIndex] };
+    if (sWorld->getBoolConfig(CONFIG_CLASSIC_PLUS_STAT_FORMULAS))
+        dodge = ClassicPlusStats::Dodge(pclass, level, dodge);
+
     // calculate diminishing (green in char screen) and non-diminishing (white) contribution
-    diminishing = 100.0f * bonus_agility * dodgeRatio->ratio * crit_to_dodge[fallbackClassIndex];
-    nondiminishing = 100.0f * (dodge_base[fallbackClassIndex] + base_agility * dodgeRatio->ratio * crit_to_dodge[fallbackClassIndex]);
+    diminishing = 100.0f * bonus_agility * dodge.PerPoint;
+    nondiminishing = 100.0f * (dodge.Base + base_agility * dodge.PerPoint);
 }
 
 float Player::GetSpellCritFromIntellect()
@@ -5442,8 +5496,11 @@ float Player::GetSpellCritFromIntellect()
     if (!critBase || !critRatio)
         return 0.0f;
 
-    float crit = critBase->base + GetStat(STAT_INTELLECT) * critRatio->ratio;
-    return crit * 100.0f;
+    ClassicPlusStats::StatCurve crit{ critBase->base, critRatio->ratio };
+    if (sWorld->getBoolConfig(CONFIG_CLASSIC_PLUS_STAT_FORMULAS))
+        crit = ClassicPlusStats::SpellCrit(pclass, level, crit);
+
+    return (crit.Base + GetStat(STAT_INTELLECT) * crit.PerPoint) * 100.0f;
 }
 
 float Player::GetRatingMultiplier(CombatRating cr) const
@@ -6217,7 +6274,7 @@ void Player::RewardReputation(Unit* victim)
 
     if (Rep->RepFaction1 && (!Rep->TeamDependent || teamId == TEAM_ALLIANCE))
     {
-        float donerep1 = CalculateReputationGain(REPUTATION_SOURCE_KILL, victim->GetLevel(), static_cast<float>(Rep->RepValue1), ChampioningFaction ? ChampioningFaction : Rep->RepFaction1);
+        float donerep1 = CalculateReputationGain(REPUTATION_SOURCE_KILL, victim->getLevelForTarget(this), static_cast<float>(Rep->RepValue1), ChampioningFaction ? ChampioningFaction : Rep->RepFaction1);
         sScriptMgr->OnPlayerGiveReputation(this, Rep->RepFaction1, donerep1, REPUTATION_SOURCE_KILL);
 
         FactionEntry const* factionEntry1 = sFactionStore.LookupEntry(ChampioningFaction ? ChampioningFaction : Rep->RepFaction1);
@@ -6229,7 +6286,7 @@ void Player::RewardReputation(Unit* victim)
 
     if (Rep->RepFaction2 && (!Rep->TeamDependent || teamId == TEAM_HORDE))
     {
-        float donerep2 = CalculateReputationGain(REPUTATION_SOURCE_KILL, victim->GetLevel(), static_cast<float>(Rep->RepValue2), ChampioningFaction ? ChampioningFaction : Rep->RepFaction2);
+        float donerep2 = CalculateReputationGain(REPUTATION_SOURCE_KILL, victim->getLevelForTarget(this), static_cast<float>(Rep->RepValue2), ChampioningFaction ? ChampioningFaction : Rep->RepFaction2);
         sScriptMgr->OnPlayerGiveReputation(this, Rep->RepFaction2, donerep2, REPUTATION_SOURCE_KILL);
 
         FactionEntry const* factionEntry2 = sFactionStore.LookupEntry(ChampioningFaction ? ChampioningFaction : Rep->RepFaction2);
@@ -7926,7 +7983,7 @@ void Player::_ApplyAllLevelScaleItemMods(bool apply)
 
 void Player::_ApplyAmmoBonuses()
 {
-    if (IsAscensionClass(getClass()))
+    if (!UsesProjectileAmmo(getClass()))
     {
         // CoA ranged damage comes from the equipped weapon, not a projectile
         // stack. Clear stale ammo DPS as well as refusing new ammo bonuses.
@@ -8481,6 +8538,9 @@ void Player::SendLoot(ObjectGuid guid, LootType loot_type)
                 else
                     permission = NONE_PERMISSION;
             }
+            if (permission == NONE_PERMISSION && loot_type == LOOT_CORPSE
+                && loot->loot_type != LOOT_SKINNING && creature->IsSharedQuestParticipant(this))
+                permission = QUEST_PERMISSION;
         }
     }
 
@@ -10308,6 +10368,41 @@ template AC_GAME_API void Player::ApplySpellMod(uint32 spellId, SpellModOp op, i
 template AC_GAME_API void Player::ApplySpellMod(uint32 spellId, SpellModOp op, uint32& basevalue, Spell* spell, bool temporaryPet);
 template AC_GAME_API void Player::ApplySpellMod(uint32 spellId, SpellModOp op, float& basevalue, Spell* spell, bool temporaryPet);
 
+bool Player::UsesAscensionSpellModifierLayout() const
+{
+    return GetSession() && GetSession()->IsAscensionCompatEnabled();
+}
+
+uint32 Player::GetClientSpellModCount() const
+{
+    return UsesAscensionSpellModifierLayout() ? MAX_SPELLMOD : MAX_CLIENT_SPELLMOD;
+}
+
+void Player::SendSpellModifier(uint16 opcode, uint8 eff, uint8 op, int32 value, uint32 spellFamily) const
+{
+    bool const useAscensionSpellModifierLayout = UsesAscensionSpellModifierLayout();
+    WorldPacket data(opcode, useAscensionSpellModifierLayout ? 11 : 6);
+    if (useAscensionSpellModifierLayout)
+    {
+        // In Ascension's multi-class modifier engine, mode 0 (11 bytes) specifies
+        // an individual modifier where the trailing uint32 is the SpellFamilyName
+        // (e.g. 32 for Starcaller, 9 for Hunter), indexing client table slice:
+        // SpellFamilyName * 0x11A0 + eff * 31 + opType.
+        data << uint8(0);
+        data << uint8(eff);
+        data << uint8(op);
+        data << int32(value);
+        data << uint32(spellFamily);
+    }
+    else
+    {
+        data << uint8(eff);
+        data << uint8(op);
+        data << int32(value);
+    }
+    SendDirectMessage(&data);
+}
+
 void Player::AddSpellMod(SpellModifier* mod, bool apply)
 {
     if (!mod)
@@ -10327,13 +10422,14 @@ void Player::AddSpellMod(SpellModifier* mod, bool apply)
     LOG_DEBUG("spells.aura", "Player::AddSpellMod {}", mod->spellId);
     uint16 Opcode = (mod->type == SPELLMOD_FLAT) ? SMSG_SET_FLAT_SPELL_MODIFIER : SMSG_SET_PCT_SPELL_MODIFIER;
 
-    bool const useAscensionSpellModifierLayout = GetSession() && GetSession()->IsAscensionCompatEnabled();
+    bool const useAscensionSpellModifierLayout = UsesAscensionSpellModifierLayout();
     SpellInfo const* modSpell = sSpellMgr->GetSpellInfo(mod->spellId);
     uint32 const spellFamily = modSpell ? modSpell->SpellFamilyName : 0;
 
     int i = 0;
     flag96 _mask = 0;
-    for (int eff = 0; eff < 96 && mod->op < MAX_CLIENT_SPELLMOD; ++eff)
+    uint32 const clientSpellModCount = GetClientSpellModCount();
+    for (int eff = 0; eff < 96 && uint32(mod->op) < clientSpellModCount; ++eff)
     {
         if (eff != 0 && eff % 32 == 0)
             _mask[i++] = 0;
@@ -10356,26 +10452,7 @@ void Player::AddSpellMod(SpellModifier* mod, bool apply)
                 }
             }
             val += apply ? mod->value : -(mod->value);
-            WorldPacket data(Opcode, useAscensionSpellModifierLayout ? 11 : 6);
-            if (useAscensionSpellModifierLayout)
-            {
-                // In Ascension's multi-class modifier engine, mode 0 (11 bytes) specifies
-                // an individual modifier where the trailing uint32 is the SpellFamilyName
-                // (e.g. 32 for Starcaller, 9 for Hunter), indexing client table slice:
-                // SpellFamilyName * 0x11A0 + eff * 31 + opType.
-                data << uint8(0);
-                data << uint8(eff);
-                data << uint8(mod->op);
-                data << int32(val);
-                data << uint32(spellFamily);
-            }
-            else
-            {
-                data << uint8(eff);
-                data << uint8(mod->op);
-                data << int32(val);
-            }
-            SendDirectMessage(&data);
+            SendSpellModifier(Opcode, eff, mod->op, val, spellFamily);
         }
     }
 
@@ -12313,7 +12390,7 @@ void Player::ApplyEquipCooldown(Item* pItem)
                 continue;
 
             if (Aura* itemAura = GetAura(spellData.SpellId, GetGUID(), pItem->GetGUID()))
-                itemAura->AddProcCooldown(std::chrono::steady_clock::now() + procEntry->Cooldown);
+                itemAura->AddProcCooldown(GameTime::SteadyNow() + procEntry->Cooldown);
             continue;
         }
 
@@ -13254,7 +13331,10 @@ uint32 Player::GetResurrectionSpellId()
 // Used in triggers for check "Only to targets that grant experience or honor" req
 bool Player::isHonorOrXPTarget(Unit* victim) const
 {
-    uint8 v_level = victim->GetLevel();
+    // The level this character is fighting, not the object's own: a scaled creature is above their
+    // gray level, so the abilities and scripts that ask "only to targets that grant experience or
+    // honor" have to see the version they are actually killing.
+    uint8 v_level = victim->getLevelForTarget(this);
     uint8 k_grey  = Acore::XP::GetGrayLevel(GetLevel());
 
     // Victim level less gray level
@@ -13752,9 +13832,14 @@ bool Player::HasBurningCommander() const
     return getClass() == CLASS_DEMON_HUNTER && GetLevel() >= 10 && HasActiveSpell(SPELL_BURNING_COMMANDER);
 }
 
+bool Player::HasValkyrGrip() const
+{
+    return getClass() == CLASS_SUN_CLERIC && HasActiveSpell(SPELL_VALKYR_GRIP);
+}
+
 bool Player::CanTitanGrip(ItemTemplate const* weapon) const
 {
-    bool commander = HasBurningCommander();
+    bool commander = HasBurningCommander() || HasValkyrGrip();
     if (!m_canTitanGrip && !commander)
         return false;
     return !weapon || (weapon->Class == ITEM_CLASS_WEAPON &&
@@ -14892,6 +14977,8 @@ void Player::LearnPetTalent(ObjectGuid petGuid, uint32 talentId, uint32 talentRa
 
     // update free talent points
     pet->SetFreeTalentPoints(CurTalentPoints - (talentRank - curtalent_maxrank + 1));
+    if (pet->HasSpell(spellid))
+        sScriptMgr->OnPlayerLearnPetTalent(this, pet, spellid);
 }
 
 void Player::AddKnownCurrency(uint32 itemId)
@@ -16974,9 +17061,9 @@ uint16 Player::GetMaxSkillValueForLevel() const
     return result;
 }
 
-float Player::GetQuestRate(bool isDFQuest)
+float Player::GetQuestRate(bool isDFQuest, int32 questLevel)
 {
-    float result = isDFQuest ? sWorld->getRate(RATE_XP_QUEST_DF) : sWorld->getRate(RATE_XP_QUEST);
+    float result = Acore::XP::QuestRate(isDFQuest, questLevel, GetLevel());
 
     sScriptMgr->OnPlayerGetQuestRate(this, result);
 

@@ -30,6 +30,7 @@
 #include "GridNotifiers.h"
 #include "Group.h"
 #include "GroupMgr.h"
+#include "LocalLevelScaling.h"
 #include "Log.h"
 #include "LootMgr.h"
 #include "ObjectMgr.h"
@@ -433,7 +434,7 @@ void Creature::RemoveCorpse(bool setSpawnTime, bool skipVisibility)
             AI()->CorpseRemoved(respawnDelay);
 
         // Should get removed later, just keep "compatibility" with scripts
-        if (setSpawnTime)
+        if (setSpawnTime && !CreatureRespawnClock::KeepsRespawnTime(m_respawnTime, IsRespawnTimerFromDeath()))
         {
             m_respawnTime = GameTime::GetGameTime().count() + respawnDelay;
             //SaveRespawnTime();
@@ -463,7 +464,7 @@ void Creature::RemoveCorpse(bool setSpawnTime, bool skipVisibility)
         // Always save respawn time in non-compat mode since the creature is being
         // destroyed — ProcessRespawns() needs the entry to know when to recreate it.
         // m_respawnTime was already set in setDeathState(JustDied).
-        if (setSpawnTime)
+        if (setSpawnTime && !CreatureRespawnClock::KeepsRespawnTime(m_respawnTime, IsRespawnTimerFromDeath()))
             m_respawnTime = std::max<time_t>(GameTime::GetGameTime().count() + respawnDelay, m_respawnTime);
         SaveRespawnTime();
 
@@ -524,11 +525,10 @@ bool Creature::InitEntry(uint32 Entry, CreatureData const* data)
 
     CreatureModel model = *ObjectMgr::ChooseDisplayId(cinfo, data);
     CreatureModelInfo const* mInfo = sObjectMgr->GetCreatureModelRandomGender(&model, cinfo);
-    if (!mInfo)                                             // Cancel load if no model defined
-    {
-        LOG_ERROR("sql.sql", "Creature (Entry: {}) has no model {} defined in table `creature_template_model`, can't load. ", Entry, model.CreatureDisplayID);
-        return false;
-    }
+    if (!mInfo)
+        LOG_DEBUG("sql.sql",
+                  "No model info for creature (Entry: {}) display {}; loading anyway.",
+                  Entry, model.CreatureDisplayID);
 
     SetDisplayId(model.CreatureDisplayID, model.DisplayScale);
     SetNativeDisplayId(model.CreatureDisplayID);
@@ -757,9 +757,17 @@ void Creature::Update(uint32 diff)
                 else
                 {
                     m_groupLootTimer -= diff;
+                    time_t const rollEnd = GameTime::GetGameTime().count() + m_groupLootTimer / IN_MILLISECONDS + 1;
+                    if (CreatureRespawnClock::KeepsRespawnTime(m_respawnTime, IsRespawnTimerFromDeath()) &&
+                        m_respawnTime < rollEnd)
+                    {
+                        m_respawnTime = rollEnd;
+                        SaveRespawnTime();
+                    }
                 }
             }
-            else if (m_corpseRemoveTime <= GameTime::GetGameTime().count())
+            else if (CreatureRespawnClock::IsCorpseDue(GameTime::GetGameTime().count(), m_corpseRemoveTime,
+                m_respawnTime, IsRespawnTimerFromDeath()))
             {
                 RemoveCorpse(false);
                 LOG_DEBUG("entities.unit", "Removing corpse... {} ", GetUInt32Value(OBJECT_FIELD_ENTRY));
@@ -1288,7 +1296,8 @@ bool Creature::CanResetTalents(Player* player) const
     if (!trainer)
         return false;
 
-    return player->GetLevel() >= 10 && trainer->IsTrainerValidForPlayer(player);
+    // A Wildcard Hero trains its ranks at any class trainer, but its talents are its rolls.
+    return player->GetLevel() >= 10 && trainer->IsTrainerValidForPlayer(player) && player->getClass() != CLASS_HERO;
 }
 
 Player* Creature::GetLootRecipient() const
@@ -1313,6 +1322,7 @@ void Creature::SetLootRecipient(Unit* unit, bool withGroup)
 
     if (!unit)
     {
+        m_sharedQuestParticipants.clear();
         m_lootRecipient.Clear();
         m_lootRecipientGroup = 0;
         RemoveDynamicFlag(UNIT_DYNFLAG_LOOTABLE | UNIT_DYNFLAG_TAPPED);
@@ -1363,6 +1373,74 @@ void Creature::SetLootRecipient(Unit* unit, bool withGroup)
         m_lootRecipientGroup = 0;
 
     SetDynamicFlag(UNIT_DYNFLAG_TAPPED);
+}
+
+bool Creature::IsSharedQuestTarget() const
+{
+    CreatureTemplate const* creatureTemplate = GetCreatureTemplate();
+    Map const* map = FindMap();
+    return creatureTemplate && (creatureTemplate->type_flags & CREATURE_TYPE_FLAG_QUEST_BOSS)
+        && map && map->IsWorldMap() && !IsControlledByPlayer();
+}
+
+void Creature::RegisterSharedQuestContributor(Unit* attacker)
+{
+    if (!attacker || !IsSharedQuestTarget())
+        return;
+
+    if (Player* player = attacker->GetCharmerOrOwnerPlayerOrPlayerItself())
+        if (m_sharedQuestParticipants.insert(player->GetGUID()).second)
+            ForceValuesUpdateAtIndex(UNIT_DYNAMIC_FLAGS);
+}
+
+bool Creature::IsSharedQuestParticipant(Player const* player) const
+{
+    return m_sharedQuestParticipants.contains(player->GetGUID());
+}
+
+bool Creature::IsSharedQuestItem(uint32 itemId) const
+{
+    if (ItemTemplate const* item = sObjectMgr->GetItemTemplate(itemId))
+        if (item->StartQuest)
+            return true;
+
+    for (ObjectGuid const& guid : m_sharedQuestParticipants)
+        if (Player* player = ObjectAccessor::FindPlayer(guid))
+            if (player->HasQuestForItem(itemId))
+                return true;
+    return false;
+}
+
+void Creature::FinalizeSharedQuestParticipants()
+{
+    GuidSet eligible;
+    for (ObjectGuid const& guid : m_sharedQuestParticipants)
+        if (Player* player = ObjectAccessor::FindPlayer(guid))
+        {
+            if (!player->IsAlive() || !player->IsAtLootRewardDistance(this) || !player->InSamePhase(this))
+                continue;
+            eligible.insert(guid);
+            if (Group* group = player->GetGroup())
+                for (GroupReference* member = group->GetFirstMember(); member; member = member->next())
+                    if (Player* other = member->GetSource())
+                        if (other->IsAlive() && other->IsAtLootRewardDistance(this) && other->InSamePhase(this))
+                            eligible.insert(other->GetGUID());
+        }
+    m_sharedQuestParticipants = std::move(eligible);
+}
+
+void Creature::RewardSharedQuestParticipants(ObjectGuid rewardedPlayer, ObjectGuid rewardedGroup)
+{
+    for (ObjectGuid const& guid : m_sharedQuestParticipants)
+        if (Player* player = ObjectAccessor::FindPlayer(guid))
+        {
+            if (guid == rewardedPlayer)
+                continue;
+            if (Group* group = player->GetGroup())
+                if (group->GetGUID() == rewardedGroup)
+                    continue;
+            player->KilledMonster(GetCreatureTemplate(), GetGUID());
+        }
 }
 
 // return true if this creature is tapped by the player or by a member of his group.
@@ -1961,8 +2039,13 @@ void Creature::setDeathState(DeathState state, bool despawn)
     if (state == DeathState::JustDied)
     {
         m_corpseRemoveTime = GameTime::GetGameTime().count() + m_corpseDelay;
-        uint32 dynamicRespawnDelay = GetMap()->ApplyDynamicModeRespawnScaling(this, m_respawnDelay);
-        m_respawnTime = GameTime::GetGameTime().count() + dynamicRespawnDelay + m_corpseDelay;
+        bool const respawnTimerFromDeath = IsRespawnTimerFromDeath();
+        uint32 dynamicRespawnDelay = GetMap()->ApplyDynamicModeRespawnScaling(this,
+            CreatureRespawnClock::DelayAtDeath(m_respawnDelay, respawnTimerFromDeath));
+        if (IsSharedQuestTarget() && !isWorldBoss())
+            dynamicRespawnDelay = std::min<uint32>(dynamicRespawnDelay, 30);
+        m_respawnTime = CreatureRespawnClock::RespawnTimeAtDeath(GameTime::GetGameTime().count(), dynamicRespawnDelay,
+            m_corpseDelay, respawnTimerFromDeath);
 
         // always save boss respawn time at death to prevent crash cheating
         if (GetMap()->IsDungeon() || isWorldBoss() || GetCreatureTemplate()->rank >= CREATURE_ELITE_ELITE)
@@ -2322,7 +2405,9 @@ bool Creature::IsImmunedToSpellEffect(SpellInfo const* spellInfo, uint32 index, 
     if (spellInfo->Effects[index].Mechanic > MECHANIC_NONE && HasMechanicTemplateImmunity(1ULL << spellInfo->Effects[index].Mechanic))
         return true;
 
-    if (GetCreatureTemplate()->type == CREATURE_TYPE_MECHANICAL && spellInfo->Effects[index].Effect == SPELL_EFFECT_HEAL)
+    // Tinker heals are designed to repair player-owned mechanical pets and devices
+    if (GetCreatureTemplate()->type == CREATURE_TYPE_MECHANICAL && spellInfo->Effects[index].Effect == SPELL_EFFECT_HEAL &&
+        !(spellInfo->SpellFamilyName == 34 && GetOwnerGUID().IsPlayer()))
         return true;
 
     return Unit::IsImmunedToSpellEffect(spellInfo, index, caster);
@@ -2664,6 +2749,12 @@ void Creature::SaveRespawnTime()
         return;
 
     GetMap()->SaveCreatureRespawnTime(m_spawnId, m_respawnTime);
+}
+
+bool Creature::IsRespawnTimerFromDeath() const
+{
+    return m_spawnId && !IsSummon() && (!m_creatureData || m_creatureData->dbData)
+        && ((IsSharedQuestTarget() && !isWorldBoss()) || sWorld->getBoolConfig(CONFIG_RESPAWN_TIMER_STARTS_AT_DEATH));
 }
 
 bool Creature::CanCreatureAttack(Unit const* victim, bool skipDistCheck) const
@@ -3149,7 +3240,7 @@ void Creature::AllLootRemovedFromCorpse()
     float decayRate = sWorld->getRate(RATE_CORPSE_DECAY_LOOTED);
     uint32 diff = uint32((m_corpseRemoveTime - now) * decayRate);
 
-    m_respawnTime -= diff;
+    m_respawnTime = CreatureRespawnClock::RespawnTimeAfterLoot(m_respawnTime, diff, IsRespawnTimerFromDeath());
 
     // corpse skinnable, but without skinning flag, and then skinned, corpse will despawn next update
     if (loot.loot_type == LOOT_SKINNING)
@@ -3162,10 +3253,31 @@ void Creature::AllLootRemovedFromCorpse()
     }
 }
 
+uint8 Creature::GetLootSkillLevelFor(Player const* looter) const
+{
+    // The client derives a corpse's skinning requirement from the level it was sent, which a per-viewer view can
+    // lower inside a dungeon. A lifted view keeps the authored level: the skinning loot is the authored creature's.
+    uint8 const view = LocalLevelScaling::ViewLevelFor(looter, this);
+    return view ? std::min(view, GetLevel()) : GetLevel();
+}
+
 uint8 Creature::getLevelForTarget(WorldObject const* target) const
 {
-    if (!isWorldBoss() || !target->ToUnit())
+    if (!isWorldBoss() || !target || !target->ToUnit())
+    {
+        // A character with open-world scaling on fights *their* version of this creature, and the
+        // whole core asks this function for the level a fight is rolled at. Answering with the
+        // level they are shown is what keeps one definition of that version: spell hit and
+        // resistance tables, weapon and defence skill, the glancing and crushing tables, detection,
+        // aggro radius and kill experience all follow from here.
+        if (target)
+            if (Unit const* opponent = target->ToUnit())
+                if (Player const* viewer = opponent->GetCharmerOrOwnerPlayerOrPlayerItself())
+                    if (uint8 const view = LocalLevelScaling::ViewLevelFor(viewer, this))
+                        return view;
+
         return Unit::getLevelForTarget(target);
+    }
 
     uint16 level = target->ToUnit()->GetLevel() + sWorld->getIntConfig(CONFIG_WORLD_BOSS_LEVEL_DIFF);
     if (level < 1)

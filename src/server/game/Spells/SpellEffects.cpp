@@ -1457,7 +1457,7 @@ void Spell::EffectJumpDest(SpellEffIndex effIndex)
     {
         player->SetCanTeleport(true);
     }
-    m_caster->GetMotionMaster()->MoveJump(x, y, z, speedXY, speedZ);
+    m_caster->GetMotionMaster()->MoveJump(x, y, z, speedXY, speedZ, 0, nullptr, m_jumpFinalOrientation);
 
     if (m_caster->IsPlayer())
     {
@@ -2920,21 +2920,36 @@ void Spell::EffectDispel(SpellEffIndex effIndex)
     uint32 dispel_type = m_spellInfo->Effects[effIndex].MiscValue;
     uint32 dispelMask  = SpellInfo::GetDispelMask(DispelType(dispel_type));
 
+    bool const rollBack = m_spellInfo->Id == 804490 && m_spellInfo->SpellFamilyName == 28;
+    bool const friendly = m_caster->IsValidAssistTarget(unitTarget);
+    int32 dispelCount = damage;
+    if (rollBack)
+    {
+        dispelMask = (1u << DISPEL_MAGIC) | (1u << DISPEL_POISON) | (1u << DISPEL_CURSE) | (1u << DISPEL_DISEASE);
+        dispelCount = friendly && m_caster->HasAura(804451) ? 2 : 1;
+    }
+
     DispelChargesList dispel_list;
     unitTarget->GetDispellableAuraList(m_caster, dispelMask, dispel_list, m_spellInfo);
+    if (rollBack)
+        dispel_list.sort([](auto const& left, auto const& right)
+        {
+            return left.first->GetApplySequence() > right.first->GetApplySequence();
+        });
     if (dispel_list.empty())
         return;
 
     // Ok if exist some buffs for dispel try dispel it
     uint32 failCount = 0;
     DispelChargesList success_list;
-    WorldPacket dataFail(SMSG_DISPEL_FAILED, 8 + 8 + 4 + 4 + damage * 4);
+    WorldPacket dataFail(SMSG_DISPEL_FAILED, 8 + 8 + 4 + 4 + std::max(dispelCount, 0) * 4);
     // dispel N = damage buffs (or while exist buffs for dispel)
-    for (int32 count = 0; count < damage && !dispel_list.empty();)
+    for (int32 count = 0; count < dispelCount && !dispel_list.empty();)
     {
         // Random select buff for dispel
         DispelChargesList::iterator itr = dispel_list.begin();
-        std::advance(itr, urand(0, dispel_list.size() - 1));
+        if (!rollBack)
+            std::advance(itr, urand(0, dispel_list.size() - 1));
 
         int32 chance = itr->first->CalcDispelChance(unitTarget, !unitTarget->IsFriendlyTo(m_caster));
         // 2.4.3 Patch Notes: "Dispel effects will no longer attempt to remove effects that have 100% dispel resistance."
@@ -2960,7 +2975,7 @@ void Spell::EffectDispel(SpellEffIndex effIndex)
                 if (!alreadyListed)
                     success_list.push_back(std::make_pair(itr->first, 1));
                 --itr->second;
-                if (itr->second <= 0)
+                if (rollBack || itr->second <= 0)
                     dispel_list.erase(itr);
             }
             else
@@ -3006,6 +3021,8 @@ void Spell::EffectDispel(SpellEffIndex effIndex)
     m_caster->SendMessageToSet(&dataSuccess, true);
 
     // On success dispel
+    sScriptMgr->OnSpellSuccessfulDispel(this, unitTarget, effIndex, uint32(success_list.size()));
+
     if (m_spellInfo->SpellFamilyName == 31 && m_spellInfo->Id == 520151 &&
         m_caster->IsPlayer() && m_caster->getClass() == CLASS_CULTIST)
         m_caster->CastSpell(m_caster, 520152, true);
@@ -5232,7 +5249,7 @@ void Spell::EffectSkinning(SpellEffIndex /*effIndex*/)
         return;
 
     Creature* creature = unitTarget->ToCreature();
-    int32 targetLevel = creature->GetLevel();
+    int32 targetLevel = creature->GetLootSkillLevelFor(m_caster->ToPlayer());
 
     uint32 skill = creature->GetCreatureTemplate()->GetRequiredLootSkill();
 
@@ -5985,7 +6002,7 @@ void Spell::EffectStealBeneficialBuff(SpellEffIndex effIndex)
     // Ok if exist some buffs for dispel try dispel it
     uint32 failCount = 0;
     DispelList success_list;
-    WorldPacket dataFail(SMSG_DISPEL_FAILED, 8 + 8 + 4 + 4 + damage * 4);
+    WorldPacket dataFail(SMSG_DISPEL_FAILED, 8 + 8 + 4 + 4 + std::max(damage, 0) * 4);
     // dispel N = damage buffs (or while exist buffs for dispel)
     for (int32 count = 0; count < damage && !steal_list.empty();)
     {
@@ -6031,7 +6048,7 @@ void Spell::EffectStealBeneficialBuff(SpellEffIndex effIndex)
     if (success_list.empty())
         return;
 
-    WorldPacket dataSuccess(SMSG_SPELLSTEALLOG, 8 + 8 + 4 + 1 + 4 + damage * 5);
+    WorldPacket dataSuccess(SMSG_SPELLSTEALLOG, 8 + 8 + 4 + 1 + 4 + std::max(damage, 0) * 5);
     dataSuccess << unitTarget->GetPackGUID();       // Victim GUID
     dataSuccess << m_caster->GetPackGUID();         // Caster GUID
     dataSuccess << uint32(m_spellInfo->Id);         // dispel spell id

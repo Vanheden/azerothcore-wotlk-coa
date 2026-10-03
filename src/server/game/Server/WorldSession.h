@@ -38,7 +38,9 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <utility>
+#include <vector>
 
 class Creature;
 class GameObject;
@@ -515,7 +517,7 @@ public:
     std::string const& GetRemoteAddress() { return m_Address; }
 
     // Set by WorldSocket: the connection uses the Ascension client protocol
-    // (loopback or AscensionCompat.AllowRemoteClients, and AscensionCompat.Enable).
+    // (loopback or CoA.AllowRemoteClients, and CoA.Enable).
     bool IsAscensionCompatEnabled() const { return _ascensionCompatEnabled; }
     void SetAscensionCompatEnabled(bool enabled) { _ascensionCompatEnabled = enabled; }
     void SetPlayer(Player* player);
@@ -578,8 +580,11 @@ public:
 
     //void SendTestCreatureQueryOpcode(uint32 entry, ObjectGuid guid, uint32 testvalue);
     void SendNameQueryOpcode(ObjectGuid guid);
+    void SendItemQuerySingleResponse(uint32 item);
 
-    void SendTrainerList(Creature* npc);
+    /// `onlyTrainable` leaves out the rows of the window the player cannot buy yet; see
+    /// Trainer::SendSpells.
+    void SendTrainerList(Creature* npc, bool onlyTrainable = false);
     void SendListInventory(ObjectGuid guid, uint32 vendorEntry = 0);
     void SendShowBank(ObjectGuid guid);
     bool CanOpenMailBox(ObjectGuid guid);
@@ -884,6 +889,7 @@ public:                                                 // opcodes handlers
     void HandleTaxiQueryAvailableNodes(WorldPacket& recvPacket);
     void HandleActivateTaxiOpcode(WorldPacket& recvPacket);
     void HandleActivateTaxiExpressOpcode(WorldPacket& recvPacket);
+    void HandleTaxiRequestEarlyLandingOpcode(WorldPacket& recvPacket);
     void HandleMoveSplineDoneOpcode(WorldPacket& recvPacket);
     void SendActivateTaxiReply(ActivateTaxiReply reply);
 
@@ -899,6 +905,7 @@ public:                                                 // opcodes handlers
     void HandleListStabledPetsOpcode(WorldPacket& recvPacket);
     void HandleStablePet(WorldPacket& recvPacket);
     void HandleUnstablePet(WorldPacket& recvPacket);
+    void HandleStableDeletePet(WorldPacket& recvPacket);
     void HandleBuyStableSlot(WorldPacket& recvPacket);
     void HandleStableRevivePet(WorldPacket& recvPacket);
     void HandleStableSwapPet(WorldPacket& recvPacket);
@@ -1091,6 +1098,9 @@ public:                                                 // opcodes handlers
     void HandleResetInstancesOpcode(WorldPackets::Instance::ResetInstances& packet);
     void HandleResetDungeonsOpcode(WorldPacket& recvData);
     void ResetAllDungeons();
+    void HandlePortGraveyardOpcode(WorldPacket& recvData);
+    void HandleQueryInstanceBindsOpcode(WorldPacket& recvData);
+    void HandleResetInstanceOpcode(WorldPacket& recvData);
     void HandleHearthAndResurrect(WorldPacket& recvData);
     void HandleInstanceLockResponse(WorldPackets::Instance::InstanceLockResponse& packet);
     void HandleUpdateMissileTrajectory(WorldPacket& recvPacket);
@@ -1238,8 +1248,18 @@ public:                                                 // opcodes handlers
      */
 
     QueryCallbackProcessor& GetQueryProcessor() { return _queryProcessor; }
+    void QueueQueryCallback(QueryCallback&& callback);
     TransactionCallback& AddTransactionCallback(TransactionCallback&& callback);
     SQLQueryHolderCallback& AddQueryHolderCallback(SQLQueryHolderCallback&& callback);
+
+    [[nodiscard]] bool HasPendingAsyncCallbacks() const
+    {
+        std::lock_guard lock(_queuedQueryCallbacksMutex);
+        if (!_queuedQueryCallbacks.empty())
+            return true;
+
+        return !_queryProcessor.Empty() || !_transactionCallbacks.Empty() || !_queryHolderProcessor.Empty();
+    }
 
     void InitializeSession();
     void InitializeSessionCallback(CharacterDatabaseQueryHolder const& realmHolder, uint32 clientCacheVersion);
@@ -1257,6 +1277,8 @@ private:
     void ProcessQueryCallbacks();
 
     QueryCallbackProcessor _queryProcessor;
+    mutable std::mutex _queuedQueryCallbacksMutex;
+    std::vector<QueryCallback> _queuedQueryCallbacks;
     AsyncCallbackProcessor<TransactionCallback> _transactionCallbacks;
     AsyncCallbackProcessor<SQLQueryHolderCallback> _queryHolderProcessor;
 

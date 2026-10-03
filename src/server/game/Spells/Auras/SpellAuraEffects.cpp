@@ -627,6 +627,8 @@ int32 AuraEffect::CalculateAmount(Unit* caster)
 
     GetBase()->CallScriptEffectCalcAmountHandlers(this, amount, m_canBeRecalculated);
 
+    sScriptMgr->OnAfterAuraEffectCalculateAmount(this, caster, amount);
+
     // Aura 317's healing clauses use independent healing-taken auras in the
     // copied data. This channel modifies only the completed absorb capacity.
     if (amount > 0 && GetBase()->GetType() == UNIT_AURA_TYPE &&
@@ -907,6 +909,12 @@ void AuraEffect::HandleEffect(Unit* target, uint8 mode, bool apply)
 void AuraEffect::ApplySpellMod(Unit* target, bool apply)
 {
     if (!m_spellmod || !target->IsPlayer())
+        return;
+
+    // Bramblepatch supplies Grove Tender's cooldown amount only on its caster's own ground.
+    // ApplySpellMod precedes aura application hooks, and a dynamic aura is shared by its recipients.
+    if (GetId() == 807120 && GetEffIndex() == EFFECT_1 && GetSpellInfo()->SpellFamilyName == 37 &&
+        GetCasterGUID() != target->GetGUID())
         return;
 
     target->ToPlayer()->AddSpellMod(m_spellmod, apply);
@@ -1200,6 +1208,10 @@ float AuraEffect::CalcPeriodicCritChance(Unit const* caster, Unit const* target)
 bool AuraEffect::IsAffectedOnSpell(SpellInfo const* spell) const
 {
     if (!spell)
+        return false;
+
+    if (GetAuraType() == SPELL_AURA_MOD_DAMAGE_FROM_CASTER && GetMiscValue() &&
+        !(GetMiscValue() & spell->GetSchoolMask()))
         return false;
 
     // Check family name and EffectClassMask
@@ -4204,12 +4216,23 @@ void AuraEffect::HandleAuraModResistance(AuraApplication const* aurApp, uint8 mo
         return;
 
     Unit* target = aurApp->GetTarget();
+    int32 amount = GetAmount();
+    if (GetMiscValue() == SPELL_SCHOOL_MASK_NORMAL)
+    {
+        // Keep area-aura sources active, but apply only the strongest grouped armor contribution.
+        // On removal, the same delta restores the next strongest remaining source.
+        int32 groupAmount = target->GetHighestExclusiveSameEffectSpellGroupValue(this, GetAuraType(),
+            true, SPELL_SCHOOL_MASK_NORMAL);
+        if (std::abs(groupAmount) >= std::abs(amount))
+            return;
+        amount -= groupAmount;
+    }
 
     for (int8 x = SPELL_SCHOOL_NORMAL; x < MAX_SPELL_SCHOOL; x++)
     {
         if (GetMiscValue() & int32(1 << x))
         {
-            target->HandleStatFlatModifier(UnitMods(UNIT_MOD_RESISTANCE_START + x), TOTAL_VALUE, float(GetAmount()), apply);
+            target->HandleStatFlatModifier(UnitMods(UNIT_MOD_RESISTANCE_START + x), TOTAL_VALUE, float(amount), apply);
             if (target->IsPlayer() || target->IsPet())
                 target->UpdateResistanceBuffModsMod(SpellSchools(x));
         }
@@ -4404,14 +4427,18 @@ void AuraEffect::HandleAscensionModMaxManaFromStat(AuraApplication const* aurApp
         return;
 
     int32 const sourceStat = GetMiscValueB();
-    if (GetMiscValue() != POWER_MANA || sourceStat < STAT_STRENGTH || sourceStat >= MAX_STATS)
+    if (sourceStat < STAT_STRENGTH || sourceStat >= MAX_STATS ||
+        (GetMiscValue() != POWER_MANA && GetMiscValue() != POWER_HEALTH))
     {
         LOG_ERROR("spells.aura.effect", "Spell {} effect {} has invalid mana/stat mapping {} <- {} for aura 328",
             GetId(), GetEffIndex(), GetMiscValue(), sourceStat);
         return;
     }
 
-    target->ToPlayer()->UpdateMaxPower(POWER_MANA);
+    if (GetMiscValue() == POWER_HEALTH)
+        target->ToPlayer()->UpdateMaxHealth();
+    else
+        target->ToPlayer()->UpdateMaxPower(POWER_MANA);
 }
 
 void AuraEffect::HandleModSpellDamagePercentFromStat(AuraApplication const* aurApp, uint8 mode, bool /*apply*/) const
@@ -4616,14 +4643,18 @@ void AuraEffect::HandleAuraModIncreaseHealth(AuraApplication const* aurApp, uint
     if (apply)
     {
         target->HandleStatFlatModifier(UNIT_MOD_HEALTH, TOTAL_VALUE, float(GetAmount()), apply);
-        target->ModifyHealth(GetAmount());
+        if (target->IsAlive())
+            target->ModifyHealth(GetAmount());
     }
     else
     {
-        if (int32(target->GetHealth()) > GetAmount())
-            target->ModifyHealth(-GetAmount());
-        else
-            target->SetHealth(1);
+        if (target->IsAlive())
+        {
+            if (int32(target->GetHealth()) > GetAmount())
+                target->ModifyHealth(-GetAmount());
+            else
+                target->SetHealth(1);
+        }
         target->HandleStatFlatModifier(UNIT_MOD_HEALTH, TOTAL_VALUE, float(GetAmount()), apply);
     }
 }
@@ -6809,7 +6840,9 @@ void AuraEffect::HandlePeriodicHealAurasTick(Unit* target, Unit* caster) const
         if (caster && GetBase()->GetType() == UNIT_AURA_TYPE &&
             !(GetSpellInfo()->AscensionInheritsResolvedAmount &&
               ((GetSpellInfo()->SpellFamilyName == 31 && GetSpellInfo()->Id == 520497) ||
-               (GetSpellInfo()->SpellFamilyName == 34 && GetSpellInfo()->Id == 706255))))
+               (GetSpellInfo()->SpellFamilyName == 26 && GetSpellInfo()->Id == 680693) ||
+               (GetSpellInfo()->SpellFamilyName == 34 && GetSpellInfo()->Id == 706255) ||
+               (GetSpellInfo()->SpellFamilyName == 28 && GetSpellInfo()->Id == 561231))))
             damage = int32(float(damage) * caster->GetTotalAuraMultiplier(SPELL_AURA_MOD_HEALING_DONE_PERCENT));
 
         damage = target->SpellHealingBonusTaken(caster, GetSpellInfo(), damage, DOT, GetBase()->GetStackAmount());
@@ -6981,7 +7014,7 @@ void AuraEffect::HandleObsModPowerAuraTick(Unit* target, Unit* caster) const
 
     int32 gain = target->ModifyPower(PowerType, amount);
 
-    if (caster)
+    if (caster && !(PowerType == POWER_MANA && target->GainsManaWithoutThreat()))
         target->GetThreatMgr().ForwardThreatForAssistingMe(caster, float(gain) * 0.5f, GetSpellInfo(), true);
 }
 
@@ -7015,7 +7048,7 @@ void AuraEffect::HandlePeriodicEnergizeAuraTick(Unit* target, Unit* caster) cons
                     GetCasterGUID().ToString(), target->GetGUID().ToString(), amount, GetId());
     int32 gain = target->ModifyPower(PowerType, amount);
 
-    if (caster)
+    if (caster && !(PowerType == POWER_MANA && target->GainsManaWithoutThreat()))
         target->GetThreatMgr().ForwardThreatForAssistingMe(caster, float(gain) * 0.5f, GetSpellInfo(), true);
 }
 

@@ -280,9 +280,9 @@ void WorldSession::HandleCharCreateOpcode(WorldPacket& recvData)
              >> createInfo->OutfitId;
 
     if (createInfo->Class == 10 && IsAscensionCompatEnabled() &&
-        sConfigMgr->GetOption<bool>("AscensionCompat.MapClass10ToWarrior", false))
+        sConfigMgr->GetOption<bool>("CoA.MapClass10ToWarrior", false))
     {
-        LOG_INFO("module.ascension_compat",
+        LOG_INFO("coa",
             "Mapping Ascension class 10 to warrior for local character creation (account ID: {})",
             GetAccountId());
         createInfo->Class = CLASS_WARRIOR;
@@ -962,13 +962,12 @@ void WorldSession::HandlePlayerLoginFromDB(LoginQueryHolder const& holder)
     }
 
     // pussywizard: send instance welcome message as when entering the instance through a portal
-    if (MapDifficulty const* mapDiff = GetMapDifficultyData(pCurrChar->GetMap()->GetId(), pCurrChar->GetMap()->GetDifficulty()))
-        if (mapDiff->resetTime)
-            if (time_t timeReset = sInstanceSaveMgr->GetResetTimeFor(pCurrChar->GetMap()->GetId(), pCurrChar->GetMap()->GetDifficulty()))
-            {
-                uint32 timeleft = uint32(timeReset - GameTime::GetGameTime().count());
-                pCurrChar->SendInstanceResetWarning(pCurrChar->GetMap()->GetId(), pCurrChar->GetMap()->GetDifficulty(), timeleft, true);
-            }
+    if (InstanceSaveMgr::GetResetDelayFor(pCurrChar->GetMap()->GetId(), pCurrChar->GetMap()->GetDifficulty()))
+        if (time_t timeReset = sInstanceSaveMgr->GetResetTimeFor(pCurrChar->GetMap()->GetId(), pCurrChar->GetMap()->GetDifficulty()))
+        {
+            uint32 timeleft = uint32(timeReset - GameTime::GetGameTime().count());
+            pCurrChar->SendInstanceResetWarning(pCurrChar->GetMap()->GetId(), pCurrChar->GetMap()->GetDifficulty(), timeleft, true);
+        }
 
     // pussywizard: ensure that we end up on map with our loaded transport:
     if (Transport* t = pCurrChar->GetTransport())
@@ -1235,18 +1234,18 @@ void WorldSession::HandlePlayerLoginToCharInWorld(Player* pCurrChar)
     pCurrChar->SetInGameTime(GameTime::GetGameTimeMS().count());
 
     // Xinef: we need to resend all spell mods
+    bool const useAscensionSpellModifierLayout = pCurrChar->UsesAscensionSpellModifierLayout();
+    uint32 const clientSpellModCount = pCurrChar->GetClientSpellModCount();
     for (uint16 Opcode = SMSG_SET_FLAT_SPELL_MODIFIER; Opcode <= SMSG_SET_PCT_SPELL_MODIFIER; ++Opcode) // PCT = FLAT+1
     {
         uint32 modType = (Opcode == SMSG_SET_FLAT_SPELL_MODIFIER) ? SPELLMOD_FLAT : SPELLMOD_PCT;
-        for (uint32 opType = SPELLMOD_DAMAGE; opType < MAX_CLIENT_SPELLMOD; ++opType)
+        for (uint32 opType = SPELLMOD_DAMAGE; opType < clientSpellModCount; ++opType)
         {
             int32 i = 0;
             flag96 _mask = 0;
             SpellModContainer const& spellMods = pCurrChar->GetSpellModList(opType);
             if (spellMods.empty())
                 continue;
-
-            bool const useAscensionSpellModifierLayout = IsAscensionCompatEnabled();
 
             if (useAscensionSpellModifierLayout)
             {
@@ -1285,17 +1284,7 @@ void WorldSession::HandlePlayerLoginToCharInWorld(Player* pCurrChar)
                         if (val == 0)
                             continue;
 
-                        // In Ascension's multi-class modifier engine, mode 0 (11 bytes) specifies
-                        // an individual modifier where the trailing uint32 is the SpellFamilyName
-                        // (e.g. 32 for Starcaller, 9 for Hunter), indexing client table slice:
-                        // SpellFamilyName * 0x11A0 + eff * 31 + opType.
-                        WorldPacket data(Opcode, 11);
-                        data << uint8(0);
-                        data << uint8(eff);
-                        data << uint8(opType);
-                        data << int32(val);
-                        data << uint32(family);
-                        SendPacket(&data);
+                        pCurrChar->SendSpellModifier(Opcode, eff, opType, val, family);
                     }
                 }
             }
@@ -1315,11 +1304,7 @@ void WorldSession::HandlePlayerLoginToCharInWorld(Player* pCurrChar)
                     if (val == 0)
                         continue;
 
-                    WorldPacket data(Opcode, 6);
-                    data << uint8(eff);
-                    data << uint8(opType);
-                    data << int32(val);
-                    SendPacket(&data);
+                    pCurrChar->SendSpellModifier(Opcode, eff, opType, val, 0);
                 }
             }
         }
@@ -1329,13 +1314,12 @@ void WorldSession::HandlePlayerLoginToCharInWorld(Player* pCurrChar)
         group->SendUpdate();
 
     // pussywizard: send instance welcome message as when entering the instance through a portal
-    if (MapDifficulty const* mapDiff = GetMapDifficultyData(pCurrChar->GetMap()->GetId(), pCurrChar->GetMap()->GetDifficulty()))
-        if (mapDiff->resetTime)
-            if (time_t timeReset = sInstanceSaveMgr->GetResetTimeFor(pCurrChar->GetMap()->GetId(), pCurrChar->GetMap()->GetDifficulty()))
-            {
-                uint32 timeleft = uint32(timeReset - GameTime::GetGameTime().count());
-                GetPlayer()->SendInstanceResetWarning(pCurrChar->GetMap()->GetId(), pCurrChar->GetMap()->GetDifficulty(), timeleft, true);
-            }
+    if (InstanceSaveMgr::GetResetDelayFor(pCurrChar->GetMap()->GetId(), pCurrChar->GetMap()->GetDifficulty()))
+        if (time_t timeReset = sInstanceSaveMgr->GetResetTimeFor(pCurrChar->GetMap()->GetId(), pCurrChar->GetMap()->GetDifficulty()))
+        {
+            uint32 timeleft = uint32(timeReset - GameTime::GetGameTime().count());
+            GetPlayer()->SendInstanceResetWarning(pCurrChar->GetMap()->GetId(), pCurrChar->GetMap()->GetDifficulty(), timeleft, true);
+        }
 
     // this shouldn't do anything, becaues offline can't be on taxi, but just in case
     pCurrChar->ContinueTaxiFlight();

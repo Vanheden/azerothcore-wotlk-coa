@@ -15,6 +15,7 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "ClassicPlusStats.h"
 #include "Config.h"
 #include "Creature.h"
 #include "Item.h"
@@ -25,6 +26,7 @@
 #include "SpellAuraEffects.h"
 #include "SpellMgr.h"
 #include "Unit.h"
+#include "World.h"
 
 inline bool _ModifyUInt32(bool apply, uint32& baseValue, int32& amount)
 {
@@ -72,6 +74,22 @@ float GetAscensionMaxManaFromStatBonus(Player const& player)
     {
         int32 const sourceStat = effect->GetMiscValueB();
         if (effect->GetMiscValue() != POWER_MANA || sourceStat < STAT_STRENGTH || sourceStat >= MAX_STATS)
+            continue;
+
+        bonus += CalculatePct(float(player.GetStat(Stats(sourceStat))), effect->GetAmount());
+    }
+
+    return bonus;
+}
+
+float GetAscensionMaxHealthFromStatBonus(Player const& player)
+{
+    float bonus = 0.0f;
+    Unit::AuraEffectList const& effects = player.GetAuraEffectsByType(SPELL_AURA_ASCENSION_MOD_MAX_MANA_FROM_STAT);
+    for (AuraEffect const* effect : effects)
+    {
+        int32 const sourceStat = effect->GetMiscValueB();
+        if (effect->GetMiscValue() != POWER_HEALTH || sourceStat < STAT_STRENGTH || sourceStat >= MAX_STATS)
             continue;
 
         bonus += CalculatePct(float(player.GetStat(Stats(sourceStat))), effect->GetAmount());
@@ -155,6 +173,7 @@ bool Player::UpdateStats(Stats stat)
             break;
         case STAT_INTELLECT:
             UpdateMaxPower(POWER_MANA);
+            UpdateMaxHealth();                              // SPELL_AURA_ASCENSION_MOD_MAX_MANA_FROM_STAT, POWER_HEALTH branch
             UpdateAllSpellCritChances();
             UpdateArmor();                                  //SPELL_AURA_MOD_RESISTANCE_OF_INTELLECT_PERCENT, only armor currently
             break;
@@ -408,7 +427,7 @@ void Player::UpdateMaxHealth()
 
     float value = GetFlatModifierValue(unitMod, BASE_VALUE) + GetCreateHealth();
     value *= GetPctModifierValue(unitMod, BASE_PCT);
-    value += GetFlatModifierValue(unitMod, TOTAL_VALUE) + GetHealthBonusFromStamina();
+    value += GetFlatModifierValue(unitMod, TOTAL_VALUE) + GetHealthBonusFromStamina() + GetAscensionMaxHealthFromStatBonus(*this);
     value *= GetPctModifierValue(unitMod, TOTAL_PCT);
 
     sScriptMgr->OnPlayerAfterUpdateMaxHealth(this, value);
@@ -520,6 +539,8 @@ void Player::UpdateAttackPowerAndDamage(bool ranged)
             IsClass(CLASS_SHAMAN, CLASS_CONTEXT_STATS) || IsClass(CLASS_ROGUE, CLASS_CONTEXT_STATS))
         {
             val2 = level * 2.0f + GetStat(STAT_STRENGTH) + GetStat(STAT_AGILITY) - 20.0f;
+            if (sWorld->getBoolConfig(CONFIG_CLASSIC_PLUS_STAT_FORMULAS))
+                val2 = ClassicPlusStats::MeleeAttackPower(getClass(), GetLevel(), GetStat(STAT_STRENGTH), val2);
         }
         else if (IsClass(CLASS_DRUID, CLASS_CONTEXT_STATS))
         {
@@ -707,7 +728,9 @@ void Player::CalculateMinMaxDamage(WeaponAttackType attType, bool normalized, bo
     float weaponMinDamage = GetWeaponDamageRange(attType, MINDAMAGE);
     float weaponMaxDamage = GetWeaponDamageRange(attType, MAXDAMAGE);
 
-    if (IsAttackSpeedOverridenShapeShift()) // forms with no override on attack speed use normal weapon damage
+    // The Mechsuit's attack speed only paces its melee swings; its ranged spells shoot the equipped gun
+    bool const mechsuitRanged = attType == RANGED_ATTACK && GetShapeshiftForm() == FORM_TINKER_MECHSUIT;
+    if (IsAttackSpeedOverridenShapeShift() && !mechsuitRanged) // forms with no override on attack speed use normal weapon damage
     {
         uint8 lvl = GetLevel();
         if (lvl > 60)
@@ -728,7 +751,7 @@ void Player::CalculateMinMaxDamage(WeaponAttackType attType, bool normalized, bo
         weaponMinDamage = BASE_MINDAMAGE;
         weaponMaxDamage = BASE_MAXDAMAGE;
     }
-    else if (attType == RANGED_ATTACK && !IsAscensionClass(getClass())) // stock classes use ammo DPS
+    else if (attType == RANGED_ATTACK && UsesProjectileAmmo(getClass())) // stock classes use ammo DPS
     {
         weaponMinDamage += GetAmmoDPS() * attackSpeedMod;
         weaponMaxDamage += GetAmmoDPS() * attackSpeedMod;
@@ -893,9 +916,10 @@ void Player::UpdateParryPercentage()
     // No parry
     float value = 0.0f;
     m_realParry = 0.0f;
-    // Starcaller learns Parry, unlike its general Druid stat fallback.
-    // Use the Hunter parry curve for both its cap and diminishing coefficient.
-    Classes const parryClass = getClass() == CLASS_STARCALLER ? CLASS_HUNTER :
+    // Starcaller and Primalist need Hunter's parry curve; their general Druid fallback has no parry cap.
+    // Sun Cleric's March of the Valkyr uses the Paladin curve with its Strength-based melee scaling.
+    Classes const parryClass = getClass() == CLASS_STARCALLER || getClass() == CLASS_WILDWALKER ? CLASS_HUNTER :
+        getClass() == CLASS_SUN_CLERIC ? CLASS_PALADIN :
         GetLegacyClassForCustomClass(Classes(getClass()));
     uint32 const pclass = parryClass - 1;
     if (CanParry() && parry_cap[pclass] > 0.0f)
